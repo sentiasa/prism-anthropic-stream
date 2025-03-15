@@ -32,7 +32,11 @@ class Stream
     public function __construct(protected PendingRequest $client) {}
 
     /**
+     * @param Request $request
      * @return Generator<Chunk>
+     * @throws PrismChunkDecodeException
+     * @throws PrismException
+     * @throws PrismRateLimitedException
      */
     public function handle(Request $request): Generator
     {
@@ -57,7 +61,7 @@ class Stream
 
         $text = '';
         $toolCalls = [];
-        $completedToolCalls = []; // Add this to store completed tool calls across content blocks
+        $completedToolCalls = []; // store completed tool calls across content blocks
         $contentType = null;
         $citations = [];
         $thinking = null;
@@ -66,22 +70,17 @@ class Stream
         while (! $response->getBody()->eof()) {
             $data = $this->parseNextDataLine($response->getBody());
 
-            // Skip empty data
             if ($data === null) {
                 continue;
             }
 
-            // Handle event types
             $eventType = data_get($data, 'type');
 
-            // Skip ping events
             if ($eventType === 'ping') {
                 continue;
             }
 
-            // Handle thinking events
             if ($eventType === 'thinking_start') {
-                // Initialize thinking storage if needed
                 if ($thinking === null) {
                     $thinking = ['thinking' => ''];
                 }
@@ -114,7 +113,6 @@ class Stream
             }
 
             if ($eventType === 'content_block_delta') {
-                $index = data_get($data, 'index', 0);
                 if ($contentType === 'text') {
                     // Try multiple possible paths for text content
                     $content = data_get($data, 'delta.text_delta.text', '');
@@ -130,7 +128,6 @@ class Stream
                         );
                     }
                 } elseif ($contentType === 'tool_use' && $currentToolCallIndex >= 0) {
-                    // Get JSON delta - use the correct path based on the debug output
                     $jsonDelta = data_get($data, 'delta.partial_json', '');
 
                     // Always accumulate JSON fragments, even empty ones
@@ -142,11 +139,9 @@ class Stream
                 continue;
             }
 
-            // Handle content_block_stop events
             if ($eventType === 'content_block_stop') {
                 // If this is the end of a tool_use block, store the completed tool call
                 if ($contentType === 'tool_use' && $currentToolCallIndex >= 0) {
-                    // Store the completed tool in our persistent array
                     $completedToolCalls[] = $toolCalls[$currentToolCallIndex];
                 }
 
@@ -168,11 +163,9 @@ class Stream
                 continue;
             }
 
-            // Handle message_delta for stop_reason detection
             if ($eventType === 'message_delta') {
                 $stopReason = data_get($data, 'delta.stop_reason');
                 if ($stopReason === 'tool_use' && !empty($completedToolCalls)) {
-                    // Prepare additional content
                     $additionalContent = [];
                     if (!empty($citations)) {
                         $additionalContent['messagePartsWithCitations'] = $citations;
@@ -196,7 +189,6 @@ class Stream
                 continue;
             }
 
-            // Handle message_stop
             if ($eventType === 'message_stop') {
                 $stopReason = data_get($data, 'stop_reason', '');
                 $finishReason = FinishReasonMap::map($stopReason);
@@ -210,9 +202,7 @@ class Stream
                     $additionalContent = array_merge($additionalContent, $thinking);
                 }
 
-                // Handle tool call completion
                 if (($stopReason === 'tool_use') && !empty($completedToolCalls)) {
-                    // First yield a chunk with tool calls
                     $toolCallObjects = ToolCallMap::map($completedToolCalls);
                     yield new Chunk(
                         text: '',
@@ -220,7 +210,6 @@ class Stream
                         finishReason: null
                     );
 
-                    // Then process the tool calls and continue the conversation
                     yield from $this->handleToolCalls($request, $text, $toolCallObjects, $depth, $additionalContent);
                     return;
                 }
@@ -233,7 +222,6 @@ class Stream
             }
         }
 
-        // In case we reach end of stream without message_stop
         if (!empty($completedToolCalls)) {
             $toolCallObjects = ToolCallMap::map($completedToolCalls);
             yield new Chunk(
