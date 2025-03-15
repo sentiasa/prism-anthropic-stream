@@ -344,6 +344,10 @@ class Stream
         yield from $this->processStream($nextResponse, $request, $depth + 1);
     }
 
+    /**
+     * @throws PrismRateLimitedException
+     * @throws PrismException
+     */
     protected function sendRequest(Request $request): Response
     {
         try {
