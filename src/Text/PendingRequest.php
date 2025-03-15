@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Prism\Prism\Text;
 
+use Generator;
 use Prism\Prism\Concerns\ConfiguresClient;
 use Prism\Prism\Concerns\ConfiguresGeneration;
 use Prism\Prism\Concerns\ConfiguresModels;
@@ -28,9 +29,25 @@ class PendingRequest
     use HasProviderMeta;
     use HasTools;
 
+    /**
+     * @deprecated Use `asText` instead.
+     */
     public function generate(): Response
     {
+        return $this->asText();
+    }
+
+    public function asText(): Response
+    {
         return $this->provider->text($this->toRequest());
+    }
+
+    /**
+     * @return Generator<Chunk>
+     */
+    public function asStream(): Generator
+    {
+        return $this->provider->stream($this->toRequest());
     }
 
     public function toRequest(): Request
