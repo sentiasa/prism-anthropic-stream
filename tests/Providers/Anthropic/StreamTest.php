@@ -19,10 +19,10 @@ beforeEach(function (): void {
 it('can generate text with a basic stream', function (): void {
     FixtureResponse::fakeStreamResponses('v1/messages', 'anthropic/stream-basic-text');
 
-    $response = Prism::stream()
+    $response = Prism::text()
         ->using('anthropic', 'claude-3-7-sonnet-20250219')
         ->withPrompt('Who are you?')
-        ->generate();
+        ->asStream();
 
     $text = '';
     $chunks = [];
@@ -59,12 +59,12 @@ it('can generate text using tools with streaming', function (): void {
             ->using(fn (string $query): string => "Search results for: {$query}"),
     ];
 
-    $response = Prism::stream()
+    $response = Prism::text()
         ->using(Provider::Anthropic, 'claude-3-7-sonnet-20250219')
         ->withTools($tools)
         ->withMaxSteps(3)
         ->withPrompt('What time is the tigers game today and should I wear a coat?')
-        ->generate();
+        ->asStream();
 
     $text = '';
     $chunks = [];
@@ -115,12 +115,12 @@ it('can process a complete conversation with multiple tool calls', function (): 
             ->using(fn (string $query): string => 'Tigers game is at 3pm in Detroit today.'),
     ];
 
-    $response = Prism::stream()
+    $response = Prism::text()
         ->using(Provider::Anthropic, 'claude-3-7-sonnet-20250219')
         ->withTools($tools)
         ->withMaxSteps(5) // Allow multiple tool call rounds
         ->withPrompt('What time is the Tigers game today and should I wear a coat in Detroit?')
-        ->generate();
+        ->asStream();
 
     $fullResponse = '';
     $toolCallCount = 0;
@@ -146,10 +146,10 @@ it('throws a PrismRateLimitedException with a 429 response code', function (): v
         ),
     ])->preventStrayRequests();
 
-    $response = Prism::stream()
+    $response = Prism::text()
         ->using(Provider::Anthropic, 'claude-3-7-sonnet-20250219')
         ->withPrompt('Who are you?')
-        ->generate();
+        ->asStream();
 
     foreach ($response as $chunk) {
         // Don't remove me rector!
