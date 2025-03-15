@@ -13,6 +13,7 @@ use Prism\Prism\Embeddings\Response as EmbeddingResponse;
 use Prism\Prism\Exceptions\PrismException;
 use Prism\Prism\Providers\Anthropic\Handlers\Structured;
 use Prism\Prism\Providers\Anthropic\Handlers\Text;
+use Prism\Prism\Providers\Anthropic\Handlers\Stream;
 use Prism\Prism\Stream\Request as StreamRequest;
 use Prism\Prism\Structured\Request as StructuredRequest;
 use Prism\Prism\Structured\Response as StructuredResponse;
@@ -58,7 +59,12 @@ readonly class Anthropic implements Provider
     #[\Override]
     public function stream(StreamRequest $request): Generator
     {
-        throw PrismException::unsupportedProviderAction(__METHOD__, class_basename($this));
+        $handler = new Stream($this->client(
+            $request->clientOptions(),
+            $request->clientRetry()
+        ));
+
+        return $handler->handle($request);
     }
 
     #[\Override]
