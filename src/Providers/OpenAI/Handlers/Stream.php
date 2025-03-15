@@ -34,11 +34,7 @@ class Stream
     public function __construct(protected PendingRequest $client) {}
 
     /**
-     * @param Request $request
      * @return Generator<Chunk>
-     * @throws PrismChunkDecodeException
-     * @throws PrismException
-     * @throws PrismRateLimitedException
      */
     public function handle(Request $request): Generator
     {
@@ -48,12 +44,7 @@ class Stream
     }
 
     /**
-     * @param Response $response
-     * @param Request $request
-     * @param int $depth
      * @return Generator<Chunk>
-     * @throws PrismChunkDecodeException
-     * @throws PrismException
      */
     protected function processStream(Response $response, Request $request, int $depth = 0): Generator
     {
@@ -100,9 +91,7 @@ class Stream
     }
 
     /**
-     * @param StreamInterface $stream
      * @return array<string, mixed>|null Parsed JSON data or null if line should be skipped
-     * @throws PrismChunkDecodeException
      */
     protected function parseNextDataLine(StreamInterface $stream): ?array
     {
@@ -148,14 +137,8 @@ class Stream
     }
 
     /**
-     * @param Request $request
-     * @param string $text
-     * @param array<int, array<string, mixed>> $toolCalls
-     * @param int $depth
+     * @param  array<int, array<string, mixed>>  $toolCalls
      * @return Generator<Chunk>
-     * @throws PrismChunkDecodeException
-     * @throws PrismException
-     * @throws PrismRateLimitedException
      */
     protected function handleToolCalls(
         Request $request,
@@ -217,10 +200,6 @@ class Stream
         return FinishReasonMap::map(data_get($data, 'choices.0.finish_reason') ?? '');
     }
 
-    /**
-     * @throws PrismRateLimitedException
-     * @throws PrismException
-     */
     protected function sendRequest(Request $request): Response
     {
         try {
