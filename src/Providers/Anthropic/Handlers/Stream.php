@@ -184,6 +184,7 @@ class Stream
             }
 
             if ($eventType === 'message_stop') {
+                $stopReason = data_get($data, 'stop_reason', '');
                 $finishReason = FinishReasonMap::map($eventType);
 
                 // Prepare additional content
