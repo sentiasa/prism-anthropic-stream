@@ -364,27 +364,15 @@ class Stream
                 'tool_choice' => ToolChoiceMap::map($request->toolChoice()),
             ]);
 
-            $apiKey = $this->client->getOptions()['headers']['Authorization'] ?? null;
-            $response = $this
+            return $this
                 ->client
                 ->withOptions(['stream' => true])
-                ->withHeaders([
-                    'anthropic-version' => '2023-06-01',
-                    'content-type' => 'application/json',
-                    'x-api-key' => $apiKey,
-                ])
+                ->throw()
                 ->post('messages', $payload);
-
-            if ($response->failed()) {
-                $response->throw();
-            }
-
-            return $response;
         } catch (Throwable $e) {
             if ($e instanceof RequestException && $e->response->getStatusCode() === 429) {
                 throw new PrismRateLimitedException($this->processRateLimits($e->response));
             }
-
             throw PrismException::providerRequestError($request->model(), $e);
         }
     }
