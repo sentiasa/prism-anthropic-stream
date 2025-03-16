@@ -240,59 +240,60 @@ class Stream
             return null;
         }
 
-        // Check if this is an event line
+        // Handle event: lines - capture event type and read the next line for data
         if (str_starts_with($line, 'event:')) {
             $eventType = trim(substr($line, strlen('event:')));
 
-            // Skip ping events
+            // Handle ping events immediately
             if ($eventType === 'ping') {
                 return ['type' => 'ping'];
             }
 
-            // For non-ping events, read the data line that should follow
+            // Read the data line that should follow
             $dataLine = $this->readLine($stream);
-            $dataLine = trim($dataLine);
 
-            // If no data line follows or it's not a data line, just return the event type
-            if (empty($dataLine) || !str_starts_with($dataLine, 'data:')) {
+            // If no data follows, just return the event type
+            if (empty(trim($dataLine))) {
                 return ['type' => $eventType];
             }
 
-            // Extract and parse the JSON data
+            // If we found an event but the next line isn't data, just return event type
+            if (!str_starts_with($dataLine, 'data:')) {
+                return ['type' => $eventType];
+            }
+
+            // Process the data line and include the event type
             $jsonData = trim(substr($dataLine, strlen('data:')));
             if (empty($jsonData)) {
                 return ['type' => $eventType];
             }
 
             try {
-                $data = json_decode($jsonData, true, 512, JSON_THROW_ON_ERROR);
-
-                // Ensure the event type is included
-                if (!isset($data['type'])) {
-                    $data['type'] = $eventType;
-                }
-
+                $data = json_decode($jsonData, true, flags: JSON_THROW_ON_ERROR);
+                $data['type'] = $eventType; // Always include the event type
                 return $data;
             } catch (Throwable $e) {
                 throw new PrismChunkDecodeException('Anthropic', $e);
             }
         }
 
-        // Handle standalone data lines (though these shouldn't normally occur in SSE)
+        // Handle standalone data: lines (more similar to OpenAI's format)
         if (str_starts_with($line, 'data:')) {
             $jsonData = trim(substr($line, strlen('data:')));
-            if (empty($jsonData)) {
+
+            // Skip empty data or DONE markers (following OpenAI pattern)
+            if (empty($jsonData) || str_contains($jsonData, 'DONE')) {
                 return null;
             }
 
             try {
-                return json_decode($jsonData, true, 512, JSON_THROW_ON_ERROR);
+                return json_decode($jsonData, true, flags: JSON_THROW_ON_ERROR);
             } catch (Throwable $e) {
                 throw new PrismChunkDecodeException('Anthropic', $e);
             }
         }
 
-        // Skip any other types of lines
+        // Skip any other line types
         return null;
     }
 
