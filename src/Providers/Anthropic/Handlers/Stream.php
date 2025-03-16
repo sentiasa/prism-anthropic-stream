@@ -61,7 +61,6 @@ class Stream
 
         $text = '';
         $toolCalls = [];
-        $completedToolCalls = []; // store completed tool calls across content blocks
         $contentType = null;
         $citations = [];
         $thinking = null;
@@ -140,11 +139,6 @@ class Stream
             }
 
             if ($eventType === 'content_block_stop') {
-                // If this is the end of a tool_use block, store the completed tool call
-                if ($contentType === 'tool_use' && $currentToolCallIndex >= 0) {
-                    $completedToolCalls[] = $toolCalls[$currentToolCallIndex];
-                }
-
                 // Reset content type after block is done
                 $contentType = null;
                 continue;
@@ -165,7 +159,7 @@ class Stream
 
             if ($eventType === 'message_delta') {
                 $stopReason = data_get($data, 'delta.stop_reason');
-                if ($stopReason === 'tool_use' && !empty($completedToolCalls)) {
+                if ($stopReason === 'tool_use' && !empty($toolCalls)) {
                     $additionalContent = [];
                     if (!empty($citations)) {
                         $additionalContent['messagePartsWithCitations'] = $citations;
@@ -175,7 +169,7 @@ class Stream
                     }
 
                     // First yield a chunk with tool calls
-                    $toolCallObjects = ToolCallMap::map($completedToolCalls);
+                    $toolCallObjects = ToolCallMap::map($toolCalls);
                     yield new Chunk(
                         text: '',
                         toolCalls: $toolCallObjects,
@@ -202,8 +196,8 @@ class Stream
                     $additionalContent = array_merge($additionalContent, $thinking);
                 }
 
-                if (($stopReason === 'tool_use') && !empty($completedToolCalls)) {
-                    $toolCallObjects = ToolCallMap::map($completedToolCalls);
+                if (($stopReason === 'tool_use') && !empty($toolCalls)) {
+                    $toolCallObjects = ToolCallMap::map($toolCalls);
                     yield new Chunk(
                         text: '',
                         toolCalls: $toolCallObjects,
@@ -222,8 +216,8 @@ class Stream
             }
         }
 
-        if (!empty($completedToolCalls)) {
-            $toolCallObjects = ToolCallMap::map($completedToolCalls);
+        if (!empty($toolCalls)) {
+            $toolCallObjects = ToolCallMap::map($toolCalls);
             yield new Chunk(
                 text: '',
                 toolCalls: $toolCallObjects,
@@ -280,8 +274,7 @@ class Stream
 
                 return $data;
             } catch (Throwable $e) {
-                // If JSON parsing fails, return just the event type
-                return ['type' => $eventType];
+                throw new PrismChunkDecodeException('Anthropic', $e);
             }
         }
 
