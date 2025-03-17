@@ -14,7 +14,6 @@ use Prism\Prism\Exceptions\PrismRateLimitedException;
 use Prism\Prism\Providers\Anthropic\Concerns\ProcessesRateLimits;
 use Prism\Prism\Providers\Anthropic\Maps\FinishReasonMap;
 use Prism\Prism\Providers\Anthropic\Maps\MessageMap;
-use Prism\Prism\Providers\Anthropic\Maps\ToolCallMap;
 use Prism\Prism\Providers\Anthropic\Maps\ToolChoiceMap;
 use Prism\Prism\Providers\Anthropic\Maps\ToolMap;
 use Prism\Prism\Text\Chunk;
@@ -105,7 +104,7 @@ class Stream
                     $toolCalls[] = [
                         'id' => $toolId,
                         'name' => $toolName,
-                        'arguments' => '',
+                        'input' => '',
                     ];
                 }
                 continue;
@@ -130,10 +129,10 @@ class Stream
                     $jsonDelta = data_get($data, 'delta.partial_json', '');
 
                     // Always accumulate JSON fragments, even empty ones
-                    if (!isset($toolCalls[$currentToolCallIndex]['arguments'])) {
-                        $toolCalls[$currentToolCallIndex]['arguments'] = '';
+                    if (!isset($toolCalls[$currentToolCallIndex]['input'])) {
+                        $toolCalls[$currentToolCallIndex]['input'] = '';
                     }
-                    $toolCalls[$currentToolCallIndex]['arguments'] .= $jsonDelta;
+                    $toolCalls[$currentToolCallIndex]['input'] .= $jsonDelta;
                 }
                 continue;
             }
@@ -169,7 +168,7 @@ class Stream
                     }
 
                     // First yield a chunk with tool calls
-                    $toolCallObjects = ToolCallMap::map($toolCalls);
+                    $toolCallObjects = $this->mapToolCalls($toolCalls);
                     yield new Chunk(
                         text: '',
                         toolCalls: $toolCallObjects,
@@ -197,7 +196,7 @@ class Stream
                 }
 
                 if (($stopReason === 'tool_use') && !empty($toolCalls)) {
-                    $toolCallObjects = ToolCallMap::map($toolCalls);
+                    $toolCallObjects = $this->mapToolCalls($toolCalls);
                     yield new Chunk(
                         text: '',
                         toolCalls: $toolCallObjects,
@@ -217,13 +216,30 @@ class Stream
         }
 
         if (!empty($toolCalls)) {
-            $toolCallObjects = ToolCallMap::map($toolCalls);
+            $toolCallObjects = $this->mapToolCalls($toolCalls);
             yield new Chunk(
                 text: '',
                 toolCalls: $toolCallObjects,
                 finishReason: null
             );
         }
+    }
+
+    /**
+     * Map tool calls from Anthropic format to our internal format
+     *
+     * @param array<int, array<string, mixed>> $toolCalls
+     * @return array<int, ToolCall>
+     */
+    protected function mapToolCalls(array $toolCalls): array
+    {
+        return array_map(function (array $toolCall): ToolCall {
+            return new ToolCall(
+                id: data_get($toolCall, 'id'),
+                name: data_get($toolCall, 'name'),
+                arguments: data_get($toolCall, 'input')
+            );
+        }, $toolCalls);
     }
 
     /**
