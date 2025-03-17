@@ -372,7 +372,8 @@ class Stream
                 ->post('messages', $payload);
         } catch (Throwable $e) {
             if ($e instanceof RequestException && $e->response->getStatusCode() === 429) {
-                throw new PrismRateLimitedException($this->processRateLimits($e->response));
+                [$rateLimits, $retryAfter] = $this->processRateLimits($e->response);
+                throw new PrismRateLimitedException($rateLimits, $retryAfter);
             }
             throw PrismException::providerRequestError($request->model(), $e);
         }
