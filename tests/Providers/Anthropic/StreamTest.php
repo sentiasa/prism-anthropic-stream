@@ -139,6 +139,36 @@ it('can process a complete conversation with multiple tool calls', function (): 
     Http::assertSentCount(3);
 });
 
+it('can process streams with text that includes citations', function (): void {
+    FixtureResponse::fakeStreamResponses('v1/messages', 'anthropic/stream-with-citations');
+
+    $response = Prism::text()
+        ->using(Provider::Anthropic, 'claude-3-7-sonnet-20250219')
+        ->withPrompt('Tell me about the benefits of exercise with citations')
+        ->asStream();
+
+    $text = '';
+    $chunks = [];
+
+    foreach ($response as $chunk) {
+        $chunks[] = $chunk;
+        $text .= $chunk->text;
+    }
+
+    expect($chunks)->not->toBeEmpty();
+    expect($text)->not->toBeEmpty();
+    // Check that text contains citation-like patterns
+    expect($text)->toContain('et al', '2006');
+
+    // Verify the HTTP request
+    Http::assertSent(function (Request $request): bool {
+        $body = json_decode($request->body(), true);
+
+        return $request->url() === 'https://api.anthropic.com/v1/messages'
+            && $body['stream'] === true;
+    });
+});
+
 it('throws a PrismRateLimitedException with a 429 response code', function (): void {
     Http::fake([
         '*' => Http::response(

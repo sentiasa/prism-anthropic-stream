@@ -16,6 +16,7 @@ use Prism\Prism\Providers\Anthropic\Maps\FinishReasonMap;
 use Prism\Prism\Providers\Anthropic\Maps\MessageMap;
 use Prism\Prism\Providers\Anthropic\Maps\ToolChoiceMap;
 use Prism\Prism\Providers\Anthropic\Maps\ToolMap;
+use Prism\Prism\Providers\Anthropic\ValueObjects\MessagePartWithCitations;
 use Prism\Prism\Text\Chunk;
 use Prism\Prism\Text\Request;
 use Prism\Prism\ValueObjects\Messages\AssistantMessage;
@@ -143,16 +144,8 @@ class Stream
                 continue;
             }
 
-            // Handle citation events
             if ($eventType === 'citation_start') {
-                $citationId = data_get($data, 'citation.id');
-                $citations[$citationId] = [
-                    'id' => $citationId,
-                    'start_index' => data_get($data, 'citation.start_index'),
-                    'end_index' => data_get($data, 'citation.end_index'),
-                    'text' => data_get($data, 'citation.text', ''),
-                    'urls' => data_get($data, 'citation.urls', []),
-                ];
+                $this->processCitationEvent($data, $citations);
                 continue;
             }
 
@@ -161,8 +154,9 @@ class Stream
                 if ($stopReason === 'tool_use' && !empty($toolCalls)) {
                     $additionalContent = [];
                     if (!empty($citations)) {
-                        $additionalContent['messagePartsWithCitations'] = $citations;
+                        $additionalContent['messagePartsWithCitations'] = $this->extractCitationsFromStream($text, $citations);
                     }
+
                     if ($thinking !== null) {
                         $additionalContent = array_merge($additionalContent, $thinking);
                     }
@@ -186,11 +180,11 @@ class Stream
                 $stopReason = data_get($data, 'stop_reason', '');
                 $finishReason = FinishReasonMap::map($eventType);
 
-                // Prepare additional content
                 $additionalContent = [];
                 if (!empty($citations)) {
-                    $additionalContent['messagePartsWithCitations'] = $citations;
+                    $additionalContent['messagePartsWithCitations'] = $this->extractCitationsFromStream($text, $citations);
                 }
+
                 if ($thinking !== null) {
                     $additionalContent = array_merge($additionalContent, $thinking);
                 }
@@ -223,6 +217,74 @@ class Stream
                 finishReason: null
             );
         }
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     * @param array<string, array<string, mixed>> $citations
+     */
+    protected function processCitationEvent(array $data, array &$citations): void
+    {
+        $citationId = data_get($data, 'citation.id');
+        $citations[$citationId] = [
+            'id' => $citationId,
+            'start_index' => data_get($data, 'citation.start_index'),
+            'end_index' => data_get($data, 'citation.end_index'),
+            'text' => data_get($data, 'citation.text', ''),
+            'urls' => data_get($data, 'citation.urls', []),
+        ];
+    }
+
+    /**
+     * @param array<string, array<string, mixed>> $streamCitations
+     * @return array<int, array<string, mixed>>
+     */
+    protected function streamCitationsToAnthropicFormat(array $streamCitations): array
+    {
+        $result = [];
+
+        foreach ($streamCitations as $citation) {
+            $result[] = [
+                'type' => 'char_location',  // Stream citations use character positions
+                'cited_text' => $citation['text'],
+                'start_char_index' => $citation['start_index'],
+                'end_char_index' => $citation['end_index'],
+                'document_index' => 0,  // Default document index
+                'document_title' => null
+            ];
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param string $text
+     * @param array<string, array<string, mixed>> $streamCitations
+     * @return array<string, mixed>
+     */
+    protected function createContentBlockWithCitations(string $text, array $streamCitations): array
+    {
+        return [
+            'type' => 'text',
+            'text' => $text,
+            'citations' => $this->streamCitationsToAnthropicFormat($streamCitations)
+        ];
+    }
+
+    /**
+     * @param string $text
+     * @param array<string, array<string, mixed>> $streamCitations
+     * @return MessagePartWithCitations[]|null
+     */
+    protected function extractCitationsFromStream(string $text, array $streamCitations): ?array
+    {
+        if (empty($streamCitations)) {
+            return null;
+        }
+
+        $contentBlock = $this->createContentBlockWithCitations($text, $streamCitations);
+
+        return [MessagePartWithCitations::fromContentBlock($contentBlock)];
     }
 
     /**
