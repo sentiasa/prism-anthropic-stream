@@ -169,6 +169,81 @@ it('can process streams with text that includes citations', function (): void {
     });
 });
 
+it('can process streams with thinking enabled', function (): void {
+    FixtureResponse::fakeStreamResponses('v1/messages', 'anthropic/stream-with-extended-thinking');
+
+    $response = Prism::text()
+        ->using(Provider::Anthropic, 'claude-3-7-sonnet-20250219')
+        ->withPrompt('What is the meaning of life?')
+        ->withProviderMeta(Provider::Anthropic, ['thinking' => ['enabled' => true]])
+        ->asStream();
+
+    $chunks = [];
+    $foundThinking = false;
+
+    foreach ($response as $chunk) {
+        $chunks[] = $chunk;
+
+        // Check if thinking content exists in any chunk
+        if ($chunk->content !== null) {
+            $contentData = json_decode($chunk->content, true);
+            if (isset($contentData['thinking'])) {
+                $foundThinking = true;
+            }
+        }
+    }
+
+    expect($chunks)->not->toBeEmpty();
+    expect($foundThinking)->toBeTrue('No thinking content found in any chunk');
+
+    $lastChunk = end($chunks);
+    expect($lastChunk->content)->not->toBeNull('Last chunk should have content');
+
+    $lastChunkData = json_decode($lastChunk->content, true);
+
+    expect($lastChunkData)->toHaveKey('thinking');
+    expect($lastChunkData['thinking'])->toContain('The question is asking about');
+
+    expect($lastChunkData)->toHaveKey('thinking_signature');
+
+    Http::assertSent(function (Request $request): bool {
+        $body = json_decode($request->body(), true);
+        return $request->url() === 'https://api.anthropic.com/v1/messages'
+            && isset($body['thinking'])
+            && $body['thinking']['type'] === 'enabled'
+            && isset($body['thinking']['budget_tokens'])
+            && $body['thinking']['budget_tokens'] === config('prism.anthropic.default_thinking_budget', 1024);
+    });
+});
+
+it('can process streams with thinking enabled with custom budget', function (): void {
+    FixtureResponse::fakeStreamResponses('v1/messages', 'anthropic/stream-with-extended-thinking');
+
+    $customBudget = 2048;
+    $response = Prism::text()
+        ->using(Provider::Anthropic, 'claude-3-7-sonnet-20250219')
+        ->withPrompt('What is the meaning of life?')
+        ->withProviderMeta(Provider::Anthropic, [
+            'thinking' => [
+                'enabled' => true,
+                'budgetTokens' => $customBudget,
+            ]
+        ])
+        ->asStream();
+
+    foreach ($response as $chunk) {
+        // Process stream
+    }
+
+    // Verify custom budget was sent
+    Http::assertSent(function (Request $request) use ($customBudget): bool {
+        $body = json_decode($request->body(), true);
+        return isset($body['thinking'])
+            && $body['thinking']['type'] === 'enabled'
+            && $body['thinking']['budget_tokens'] === $customBudget;
+    });
+});
+
 it('throws a PrismRateLimitedException with a 429 response code', function (): void {
     Http::fake([
         '*' => Http::response(
