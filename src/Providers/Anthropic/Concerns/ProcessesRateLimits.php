@@ -1,5 +1,7 @@
 <?php
+
 declare(strict_types=1);
+
 namespace Prism\Prism\Providers\Anthropic\Concerns;
 
 use Illuminate\Http\Client\Response;
@@ -11,14 +13,11 @@ use Str;
 trait ProcessesRateLimits
 {
     /**
-     * Process rate limit headers from Anthropic API responses.
-     *
-     * @param Response|null $response
      * @return array{0: ProviderRateLimit[], 1: ?int}
      */
     protected function processRateLimits(?Response $response = null): array
     {
-        if ($response === null) {
+        if (!$response instanceof Response) {
             return [[], null];
         }
 

@@ -52,6 +52,7 @@ class Stream
 
     /**
      * @return Generator<Chunk>
+     *
      * @throws PrismChunkDecodeException
      * @throws PrismException
      * @throws PrismRateLimitedException
@@ -64,10 +65,8 @@ class Stream
     }
 
     /**
-     * @param Response $response
-     * @param Request $request
-     * @param int $depth
      * @return Generator<Chunk>
+     *
      * @throws PrismChunkDecodeException
      * @throws PrismException
      */
@@ -79,7 +78,7 @@ class Stream
             throw new PrismException('Maximum tool call chain depth exceeded');
         }
 
-        while (!$response->getBody()->eof()) {
+        while (! $response->getBody()->eof()) {
             $chunk = $this->parseNextChunk($response->getBody());
 
             if ($chunk === null) {
@@ -96,7 +95,7 @@ class Stream
 
                 case 'content_block_delta':
                     $chunkResult = $this->handleContentBlockDelta($chunk);
-                    if ($chunkResult !== null) {
+                    if ($chunkResult instanceof Chunk) {
                         yield $chunkResult;
                     }
                     break;
@@ -112,8 +111,9 @@ class Stream
 
                 case 'message_delta':
                     $stopReason = data_get($chunk, 'delta.stop_reason');
-                    if ($stopReason === 'tool_use' && !empty($this->toolCalls)) {
+                    if ($stopReason === 'tool_use' && $this->toolCalls !== []) {
                         yield from $this->handleToolUseFinish($request, $depth);
+
                         return;
                     }
                     break;
@@ -122,8 +122,9 @@ class Stream
                     $stopReason = data_get($chunk, 'stop_reason', '');
                     $finishReason = FinishReasonMap::map($stopReason);
 
-                    if ($stopReason === 'tool_use' && !empty($this->toolCalls)) {
+                    if ($stopReason === 'tool_use' && $this->toolCalls !== []) {
                         yield from $this->handleToolUseFinish($request, $depth);
+
                         return;
                     }
 
@@ -132,14 +133,14 @@ class Stream
                     yield new Chunk(
                         text: '',
                         finishReason: $finishReason,
-                        content: !empty($additionalContent) ? json_encode($additionalContent) : null
+                        content: $additionalContent === [] ? null : json_encode($additionalContent)
                     );
 
                     return;
             }
         }
 
-        if (!empty($this->toolCalls)) {
+        if ($this->toolCalls !== []) {
             yield from $this->handleToolUseFinish($request, $depth);
         }
     }
@@ -156,7 +157,7 @@ class Stream
     }
 
     /**
-     * @param array<string, mixed> $chunk
+     * @param  array<string, mixed>  $chunk
      */
     protected function handleContentBlockStart(array $chunk): void
     {
@@ -176,8 +177,7 @@ class Stream
     }
 
     /**
-     * @param array<string, mixed> $chunk
-     * @return Chunk|null
+     * @param  array<string, mixed>  $chunk
      */
     protected function handleContentBlockDelta(array $chunk): ?Chunk
     {
@@ -195,7 +195,7 @@ class Stream
                     $textDelta = data_get($chunk, 'text', '');
                 }
 
-                if (!empty($textDelta)) {
+                if (! empty($textDelta)) {
                     $this->text .= $textDelta;
 
                     return new Chunk(
@@ -240,7 +240,7 @@ class Stream
     }
 
     /**
-     * @param array<string, mixed> $chunk
+     * @param  array<string, mixed>  $chunk
      */
     protected function handleCitationStart(array $chunk): void
     {
@@ -264,14 +264,14 @@ class Stream
      */
     protected function extractCitationsFromStream(): ?array
     {
-        if (empty($this->citations)) {
+        if ($this->citations === []) {
             return null;
         }
 
         $contentBlock = [
             'type' => 'text',
             'text' => $this->text,
-            'citations' => $this->streamCitationsToAnthropicFormat()
+            'citations' => $this->streamCitationsToAnthropicFormat(),
         ];
 
         return [MessagePartWithCitations::fromContentBlock($contentBlock)];
@@ -291,7 +291,7 @@ class Stream
                 'start_char_index' => $citation['start_index'],
                 'end_char_index' => $citation['end_index'],
                 'document_index' => 0,
-                'document_title' => null
+                'document_title' => null,
             ];
         }
 
@@ -313,7 +313,7 @@ class Stream
             }
         }
 
-        if (!empty($this->citations)) {
+        if ($this->citations !== []) {
             $messagePartsWithCitations = $this->extractCitationsFromStream();
             if ($messagePartsWithCitations !== null) {
                 $additionalContent['messagePartsWithCitations'] = $messagePartsWithCitations;
@@ -324,9 +324,8 @@ class Stream
     }
 
     /**
-     * @param Request $request
-     * @param int $depth
      * @return Generator<Chunk>
+     *
      * @throws PrismChunkDecodeException
      * @throws PrismException
      * @throws PrismRateLimitedException
@@ -340,7 +339,7 @@ class Stream
             text: '',
             toolCalls: $mappedToolCalls,
             finishReason: null,
-            content: !empty($additionalContent) ? json_encode($additionalContent) : null
+            content: $additionalContent === [] ? null : json_encode($additionalContent)
         );
 
         yield from $this->handleToolCalls($request, $mappedToolCalls, $depth, $additionalContent);
@@ -365,27 +364,24 @@ class Stream
         }, $this->toolCalls));
     }
 
-    /**
-     * @param string $string
-     * @return bool
-     */
     protected function isValidJson(string $string): bool
     {
-        if (empty($string)) {
+        if ($string === '' || $string === '0') {
             return false;
         }
 
         try {
             json_decode($string, true, 512, JSON_THROW_ON_ERROR);
+
             return true;
-        } catch (Throwable $e) {
+        } catch (Throwable) {
             return false;
         }
     }
 
     /**
-     * @param StreamInterface $stream
      * @return array<string, mixed>|null
+     *
      * @throws PrismChunkDecodeException
      */
     protected function parseNextChunk(StreamInterface $stream): ?array
@@ -393,7 +389,7 @@ class Stream
         $line = $this->readLine($stream);
         $line = trim($line);
 
-        if (empty($line)) {
+        if ($line === '' || $line === '0') {
             return null;
         }
 
@@ -406,23 +402,24 @@ class Stream
 
             $dataLine = $this->readLine($stream);
 
-            if (empty(trim($dataLine))) {
+            if (in_array(trim($dataLine), ['', '0'], true)) {
                 return ['type' => $eventType];
             }
 
-            if (!str_starts_with(trim($dataLine), 'data:')) {
+            if (! str_starts_with(trim($dataLine), 'data:')) {
                 return ['type' => $eventType];
             }
 
             $jsonData = trim(substr(trim($dataLine), strlen('data:')));
 
-            if (empty($jsonData)) {
+            if ($jsonData === '' || $jsonData === '0') {
                 return ['type' => $eventType];
             }
 
             try {
                 $data = json_decode($jsonData, true, flags: JSON_THROW_ON_ERROR);
                 $data['type'] = $eventType;
+
                 return $data;
             } catch (Throwable $e) {
                 throw new PrismChunkDecodeException('Anthropic', $e);
@@ -432,7 +429,7 @@ class Stream
         if (str_starts_with($line, 'data:')) {
             $jsonData = trim(substr($line, strlen('data:')));
 
-            if (empty($jsonData) || str_contains($jsonData, 'DONE')) {
+            if ($jsonData === '' || $jsonData === '0' || str_contains($jsonData, 'DONE')) {
                 return null;
             }
 
@@ -447,11 +444,10 @@ class Stream
     }
 
     /**
-     * @param Request $request
-     * @param array<int, ToolCall> $toolCalls
-     * @param int $depth
-     * @param array<string, mixed>|null $additionalContent
+     * @param  array<int, ToolCall>  $toolCalls
+     * @param  array<string, mixed>|null  $additionalContent
      * @return Generator<Chunk>
+     *
      * @throws PrismChunkDecodeException
      * @throws PrismException
      * @throws PrismRateLimitedException
@@ -477,8 +473,6 @@ class Stream
     }
 
     /**
-     * @param Request $request
-     * @return Response
      * @throws PrismRateLimitedException
      * @throws PrismException
      */
@@ -518,15 +512,11 @@ class Stream
         }
     }
 
-    /**
-     * @param StreamInterface $stream
-     * @return string
-     */
     protected function readLine(StreamInterface $stream): string
     {
         $buffer = '';
 
-        while (!$stream->eof()) {
+        while (! $stream->eof()) {
             $byte = $stream->read(1);
 
             if ($byte === '') {

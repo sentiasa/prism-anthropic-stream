@@ -74,13 +74,13 @@ it('can generate text using tools with streaming', function (): void {
     foreach ($response as $chunk) {
         $chunks[] = $chunk;
 
-        if (! empty($chunk->toolCalls)) {
+        if ($chunk->toolCalls !== []) {
             $toolCallFound = true;
             expect($chunk->toolCalls[0]->name)->not->toBeEmpty();
             expect($chunk->toolCalls[0]->arguments())->toBeArray();
         }
 
-        if (! empty($chunk->toolResults)) {
+        if ($chunk->toolResults !== []) {
             $toolResults = array_merge($toolResults, $chunk->toolResults);
         }
 
@@ -126,7 +126,7 @@ it('can process a complete conversation with multiple tool calls', function (): 
     $toolCallCount = 0;
 
     foreach ($response as $chunk) {
-        if (! empty($chunk->toolCalls)) {
+        if ($chunk->toolCalls !== []) {
             $toolCallCount++;
         }
         $fullResponse .= $chunk->text;
@@ -208,6 +208,7 @@ it('can process streams with thinking enabled', function (): void {
 
     Http::assertSent(function (Request $request): bool {
         $body = json_decode($request->body(), true);
+
         return $request->url() === 'https://api.anthropic.com/v1/messages'
             && isset($body['thinking'])
             && $body['thinking']['type'] === 'enabled'
@@ -227,7 +228,7 @@ it('can process streams with thinking enabled with custom budget', function (): 
             'thinking' => [
                 'enabled' => true,
                 'budgetTokens' => $customBudget,
-            ]
+            ],
         ])
         ->asStream();
 
@@ -238,6 +239,7 @@ it('can process streams with thinking enabled with custom budget', function (): 
     // Verify custom budget was sent
     Http::assertSent(function (Request $request) use ($customBudget): bool {
         $body = json_decode($request->body(), true);
+
         return isset($body['thinking'])
             && $body['thinking']['type'] === 'enabled'
             && $body['thinking']['budget_tokens'] === $customBudget;
