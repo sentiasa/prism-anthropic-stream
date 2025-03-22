@@ -171,7 +171,6 @@ class Stream
             $this->thinking = '';
             $this->thinkingSignature = '';
         } elseif ($this->contentBlockType === 'tool_use') {
-            // Ensure we're using integer keys for the toolCalls array
             $index = $this->contentBlockIndex;
             $this->toolCalls[$index] = [
                 'id' => data_get($chunk, 'content_block.id'),
