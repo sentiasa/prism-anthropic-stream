@@ -33,6 +33,9 @@ class Stream
 
     protected string $text = '';
 
+    /**
+     * @var array<int, array<string, mixed>>
+     */
     protected array $toolCalls = [];
 
     protected ?string $contentBlockType = null;
@@ -133,7 +136,7 @@ class Stream
                     yield new Chunk(
                         text: '',
                         finishReason: $finishReason,
-                        content: $additionalContent === [] ? null : json_encode($additionalContent)
+                        content: $additionalContent === [] ? null : (string) json_encode($additionalContent)
                     );
 
                     return;
@@ -162,13 +165,15 @@ class Stream
     protected function handleContentBlockStart(array $chunk): void
     {
         $this->contentBlockType = data_get($chunk, 'content_block.type');
-        $this->contentBlockIndex = data_get($chunk, 'index');
+        $this->contentBlockIndex = (int) data_get($chunk, 'index');
 
         if ($this->contentBlockType === 'thinking') {
             $this->thinking = '';
             $this->thinkingSignature = '';
         } elseif ($this->contentBlockType === 'tool_use') {
-            $this->toolCalls[$this->contentBlockIndex] = [
+            // Ensure we're using integer keys for the toolCalls array
+            $index = $this->contentBlockIndex;
+            $this->toolCalls[$index] = [
                 'id' => data_get($chunk, 'content_block.id'),
                 'name' => data_get($chunk, 'content_block.name'),
                 'input' => '',
@@ -211,7 +216,7 @@ class Stream
                 $jsonDelta = data_get($chunk, 'delta.input_json_delta.partial_json', '');
             }
 
-            if (isset($this->toolCalls[$this->contentBlockIndex])) {
+            if ($this->contentBlockIndex !== null && isset($this->toolCalls[$this->contentBlockIndex])) {
                 $this->toolCalls[$this->contentBlockIndex]['input'] .= $jsonDelta;
             }
 
@@ -339,7 +344,7 @@ class Stream
             text: '',
             toolCalls: $mappedToolCalls,
             finishReason: null,
-            content: $additionalContent === [] ? null : json_encode($additionalContent)
+            content: $additionalContent === [] ? null : (string) json_encode($additionalContent)
         );
 
         yield from $this->handleToolCalls($request, $mappedToolCalls, $depth, $additionalContent);
@@ -460,7 +465,7 @@ class Stream
     ): Generator {
         $toolResults = $this->callTools($request->tools(), $toolCalls);
 
-        $request->addMessage(new AssistantMessage($this->text, $toolCalls, $additionalContent));
+        $request->addMessage(new AssistantMessage($this->text, $toolCalls, $additionalContent ?? []));
         $request->addMessage(new ToolResultMessage($toolResults));
 
         yield new Chunk(
@@ -507,7 +512,6 @@ class Stream
             if ($e instanceof RequestException && $e->response->getStatusCode() === 429) {
                 throw new PrismRateLimitedException($this->processRateLimits($e->response));
             }
-
             throw PrismException::providerRequestError($request->model(), $e);
         }
     }
