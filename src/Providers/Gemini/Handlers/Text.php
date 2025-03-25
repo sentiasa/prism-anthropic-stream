@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace Prism\Prism\Providers\Gemini\Handlers;
 
+use Exception;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response as ClientResponse;
 use Prism\Prism\Concerns\CallsTools;
 use Prism\Prism\Enums\FinishReason;
 use Prism\Prism\Enums\Provider;
 use Prism\Prism\Exceptions\PrismException;
+use Prism\Prism\Providers\Gemini\Concerns\ExtractSearchGroundings;
 use Prism\Prism\Providers\Gemini\Concerns\ValidatesResponse;
 use Prism\Prism\Providers\Gemini\Maps\FinishReasonMap;
 use Prism\Prism\Providers\Gemini\Maps\MessageMap;
@@ -29,7 +31,7 @@ use Throwable;
 
 class Text
 {
-    use CallsTools, ValidatesResponse;
+    use CallsTools, ExtractSearchGroundings, ValidatesResponse;
 
     protected ResponseBuilder $responseBuilder;
 
@@ -74,22 +76,37 @@ class Text
     protected function sendRequest(Request $request): ClientResponse
     {
         try {
+            $providerMeta = $request->providerMeta(Provider::Gemini);
+
             $generationConfig = array_filter([
                 'temperature' => $request->temperature(),
                 'topP' => $request->topP(),
                 'maxOutputTokens' => $request->maxTokens(),
             ]);
 
-            $tools = ToolMap::map($request->tools());
+            if ($request->tools() !== [] && ($providerMeta['searchGrounding'] ?? false)) {
+                throw new Exception('Use of search grounding with custom tools is not currently supported by Prism.');
+            }
+
+            $tools = $providerMeta['searchGrounding'] ?? false
+                ? [
+                    [
+                        'google_search' => (object) [],
+                    ],
+                ]
+                : ($request->tools() !== [] ? ['function_declarations' => ToolMap::map($request->tools())] : []);
+
+            $providerMeta = $request->providerMeta(Provider::Gemini);
 
             return $this->client->post(
                 "{$request->model()}:generateContent",
                 array_filter([
                     ...(new MessageMap($request->messages(), $request->systemPrompts()))(),
+                    'cachedContent' => $providerMeta['cachedContentName'] ?? null,
                     'generationConfig' => $generationConfig !== [] ? $generationConfig : null,
-                    'tools' => $tools !== [] ? ['function_declarations' => $tools] : null,
+                    'tools' => $tools !== [] ? $tools : null,
                     'tool_config' => $request->toolChoice() ? ToolChoiceMap::map($request->toolChoice()) : null,
-                    'safetySettings' => $request->providerMeta(Provider::Gemini, 'safetySettings'),
+                    'safetySettings' => $providerMeta['safetySettings'] ?? null,
                 ])
             );
         } catch (Throwable $e) {
@@ -139,14 +156,19 @@ class Text
      */
     protected function addStep(array $data, Request $request, FinishReason $finishReason, array $toolResults = []): void
     {
+        $providerMeta = $request->providerMeta(Provider::Gemini);
+
         $this->responseBuilder->addStep(new Step(
             text: data_get($data, 'candidates.0.content.parts.0.text') ?? '',
             finishReason: $finishReason,
             toolCalls: $finishReason === FinishReason::ToolCalls ? ToolCallMap::map(data_get($data, 'candidates.0.content.parts', [])) : [],
             toolResults: $toolResults,
             usage: new Usage(
-                data_get($data, 'usageMetadata.promptTokenCount', 0),
-                data_get($data, 'usageMetadata.candidatesTokenCount', 0)
+                promptTokens: isset($providerMeta['cachedContentName'])
+                    ? (data_get($data, 'usageMetadata.promptTokenCount', 0) - data_get($data, 'usageMetadata.cachedContentTokenCount', 0))
+                    : data_get($data, 'usageMetadata.promptTokenCount', 0),
+                completionTokens: data_get($data, 'usageMetadata.candidatesTokenCount', 0),
+                cacheReadInputTokens: data_get($data, 'usageMetadata.cachedContentTokenCount', null),
             ),
             meta: new Meta(
                 id: data_get($data, 'id', ''),
@@ -154,7 +176,9 @@ class Text
             ),
             messages: $request->messages(),
             systemPrompts: $request->systemPrompts(),
-            additionalContent: [],
+            additionalContent: [
+                ...$this->extractSearchGroundingContent($data),
+            ],
         ));
     }
 }

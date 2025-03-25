@@ -8,10 +8,14 @@ use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Prism\Prism\Enums\FinishReason;
 use Prism\Prism\Enums\Provider;
+use Prism\Prism\Exceptions\PrismException;
 use Prism\Prism\Prism;
+use Prism\Prism\Providers\Gemini\ValueObjects\MessagePartWithSearchGroundings;
+use Prism\Prism\Providers\Gemini\ValueObjects\SearchGrounding;
 use Prism\Prism\Tool;
 use Prism\Prism\ValueObjects\Messages\Support\Document;
 use Prism\Prism\ValueObjects\Messages\Support\Image;
+use Prism\Prism\ValueObjects\Messages\SystemMessage;
 use Prism\Prism\ValueObjects\Messages\UserMessage;
 use Tests\Fixtures\FixtureResponse;
 
@@ -311,5 +315,125 @@ describe('Document support for Gemini', function (): void {
 
             return true;
         });
+    });
+});
+
+describe('search grounding', function (): void {
+    it('adds the google_search empty tool if searchGrounding is set to true', function (): void {
+        FixtureResponse::fakeResponseSequence('*', 'gemini/generate-text-with-search-grounding');
+
+        Prism::text()
+            ->using(Provider::Gemini, 'gemini-2.0-flash')
+            ->withPrompt('What is the stock price of Google right now?')
+            ->withProviderMeta(Provider::Gemini, ['searchGrounding' => true])
+            ->generate();
+
+        Http::assertSent(function (Request $request): true {
+            $data = $request->data();
+
+            expect($data['tools'][0])->toHaveKey('google_search');
+            expect($data['tools'][0]['google_search'])->toBeObject();
+
+            return true;
+        });
+    });
+
+    it('throws an exception of searchGrounding is enabled with other tools', function (): void {
+        Http::fake()->preventStrayRequests();
+
+        $tools = [
+            (new Tool)
+                ->as('search_games')
+                ->for('useful for searching current games times in the city')
+                ->withStringParameter('city', 'The city that you want the game times for')
+                ->using(fn (string $city): string => 'The tigers game is at 3pm in detroit'),
+        ];
+
+        Prism::text()
+            ->using(Provider::Gemini, 'gemini-2.0-flash')
+            ->withMaxSteps(3)
+            ->withTools($tools)
+            ->withPrompt('What sport fixtures are on today, and will I need a coat based on today\'s weather forecast?')
+            ->withProviderMeta(Provider::Gemini, ['searchGrounding' => true])
+            ->generate();
+    })->throws(PrismException::class, 'Use of search grounding with custom tools is not currently supported by Prism.');
+
+    it('uses search grounding where searchGrounding is true on provider meta', function (): void {
+        FixtureResponse::fakeResponseSequence('*', 'gemini/generate-text-with-search-grounding');
+
+        $response = Prism::text()
+            ->using(Provider::Gemini, 'gemini-2.0-flash')
+            ->withPrompt('What is the stock price of Google right now?')
+            ->withProviderMeta(Provider::Gemini, ['searchGrounding' => true])
+            ->generate();
+
+        expect($response->text)->toContain('Alphabet Inc.');
+    });
+
+    it('maps search groundings into additional content', function (): void {
+        FixtureResponse::fakeResponseSequence('*', 'gemini/generate-text-with-search-grounding');
+
+        $response = Prism::text()
+            ->using(Provider::Gemini, 'gemini-2.0-flash')
+            ->withPrompt('What is the stock price of Google right now?')
+            ->withProviderMeta(Provider::Gemini, ['searchGrounding' => true])
+            ->generate();
+
+        expect($response->additionalContent)->toHaveKey('searchEntryPoint');
+        expect($response->additionalContent)->toHaveKey('searchQueries');
+        expect($response->additionalContent)->toHaveKey('groundingSupports');
+
+        expect($response->additionalContent['searchEntryPoint'])->not()->toBe('');
+        expect($response->additionalContent['searchQueries'])->toHaveCount(1);
+        expect($response->additionalContent['groundingSupports'])->toHaveCount(4);
+
+        expect($response->additionalContent['groundingSupports'][0])->toBeInstanceOf(MessagePartWithSearchGroundings::class);
+        expect($response->additionalContent['groundingSupports'][0]->text)->not()->toBe('');
+        expect($response->additionalContent['groundingSupports'][0]->startIndex)->not()->toBe(0);
+        expect($response->additionalContent['groundingSupports'][0]->endIndex)->not()->toBe(0);
+        expect($response->additionalContent['groundingSupports'][0]->groundings)->toHaveCount(1);
+        expect($response->additionalContent['groundingSupports'][0]->groundings[0])->toBeInstanceOf(SearchGrounding::class);
+        expect($response->additionalContent['groundingSupports'][0]->groundings[0]->title)->not()->toBe('');
+        expect($response->additionalContent['groundingSupports'][0]->groundings[0]->uri)->not()->toBe('');
+        expect($response->additionalContent['groundingSupports'][0]->groundings[0]->confidence)->not()->toBe(0.0);
+    });
+});
+
+describe('Cache support for Gemini', function (): void {
+    it('can use a cache object with a text request', function (): void {
+        FixtureResponse::fakeResponseSequence('*', 'gemini/use-cache-with-text');
+
+        /** @var Gemini */
+        $provider = Prism::provider(Provider::Gemini);
+
+        $object = $provider->cache(
+            model: 'gemini-1.5-flash-002',
+            messages: [
+                new UserMessage('', [
+                    Document::fromPath('tests/Fixtures/long-document.pdf'),
+                ]),
+            ],
+            systemPrompts: [
+                new SystemMessage('You are a legal analyst.'),
+            ],
+            ttl: 30
+        );
+
+        $response = Prism::text()
+            ->using(Provider::Gemini, 'gemini-1.5-flash-002')
+            ->withProviderMeta(Provider::Gemini, ['cachedContentName' => $object->name])
+            ->withPrompt('In no more than 100 words, what is the document about?')
+            ->generate();
+
+        Http::assertSentInOrder([
+            fn (Request $request): bool => true,
+            fn (Request $request): bool => $request->data()['cachedContent'] === $object->name,
+        ]);
+
+        expect($response->text)->toBe("That's the Consolidated Version of the Treaty on the Functioning of the European Union (TFEU), adopted on 25 March 1957.  It outlines the principles, competencies, and policies of the European Union.  The TFEU organizes the EU's functioning and details its areas of competence, including exclusive, shared, and supporting competences.  It also covers non-discrimination, citizenship, and various EU policies (e.g., internal market, agriculture, and justice).  Finally, it sets out institutional and financial provisions.\n");
+
+        expect($response->usage->promptTokens)->toBe(16);
+        expect($response->usage->completionTokens)->toBe(116);
+        expect($response->usage->cacheReadInputTokens)->toBe(88759);
     });
 });

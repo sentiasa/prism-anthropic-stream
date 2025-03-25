@@ -13,7 +13,8 @@
       "anthropic",
       "openai",
       "unresolvable",
-      "voyageai"
+      "voyageai",
+      "ttl"
     ],
     "paths": []
   }

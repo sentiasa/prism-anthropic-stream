@@ -11,6 +11,7 @@ use Prism\Prism\Exceptions\PrismRateLimitedException;
 use Prism\Prism\Prism;
 use Prism\Prism\Providers\OpenAI\Concerns\ProcessesRateLimits;
 use Prism\Prism\ValueObjects\ProviderRateLimit;
+use Tests\Fixtures\FixtureResponse;
 
 arch()->expect([
     'Providers\OpenAI\Handlers\Text',
@@ -40,6 +41,7 @@ it('sets the correct data on the PrismRateLimitedException', function (): void {
             '*' => Http::response(
                 status: 429,
                 headers: [
+                    'retry-after' => 29,
                     'x-ratelimit-limit-requests' => 60,
                     'x-ratelimit-limit-tokens' => 150000,
                     'x-ratelimit-remaining-requests' => 0,
@@ -56,7 +58,7 @@ it('sets the correct data on the PrismRateLimitedException', function (): void {
                 ->withPrompt('Hello world!')
                 ->generate();
         } catch (PrismRateLimitedException $e) {
-            expect($e->retryAfter)->toEqual(null);
+            expect($e->retryAfter)->toEqual(29);
             expect($e->rateLimits)->toHaveCount(2);
             expect($e->rateLimits[0])->toBeInstanceOf(ProviderRateLimit::class);
             expect($e->rateLimits[0]->name)->toEqual('requests');
@@ -99,4 +101,19 @@ it('works with milleseconds', function (): void {
             expect($e->rateLimits[0]->resetsAt->equalTo($time->addMilliseconds(70)))->toBeTrue();
         }
     });
+});
+
+it('works without rate limit headers', function (): void {
+    $this->expectException(PrismRateLimitedException::class);
+
+    FixtureResponse::fakeResponseSequence(
+        'v1/chat/completions',
+        'openai/insufficient-quota-response',
+        status: 429
+    );
+
+    Prism::text()
+        ->using('openai', 'gpt-4')
+        ->withPrompt('Who are you?')
+        ->asText();
 });
