@@ -23,6 +23,7 @@ use Prism\Prism\Text\Chunk;
 use Prism\Prism\Text\Request;
 use Prism\Prism\ValueObjects\Messages\AssistantMessage;
 use Prism\Prism\ValueObjects\Messages\ToolResultMessage;
+use Prism\Prism\ValueObjects\Meta;
 use Prism\Prism\ValueObjects\ToolCall;
 use Psr\Http\Message\StreamInterface;
 use Throwable;
@@ -30,6 +31,10 @@ use Throwable;
 class Stream
 {
     use CallsTools, HandlesResponse;
+
+    protected string $model = '';
+
+    protected string $requestId = '';
 
     protected string $text = '';
 
@@ -92,6 +97,11 @@ class Stream
                 case 'ping':
                     break;
 
+                case 'message_start':
+                    $this->model = data_get($chunk, 'message.model', '');
+                    $this->requestId = data_get($chunk, 'message.id', '');
+                    break;
+
                 case 'content_block_start':
                     $this->handleContentBlockStart($chunk);
                     break;
@@ -136,6 +146,11 @@ class Stream
                     yield new Chunk(
                         text: '',
                         finishReason: $finishReason,
+                        meta: new Meta(
+                            id: $this->requestId,
+                            model: $this->model,
+                            rateLimits: $this->processRateLimits($response)
+                        ),
                         content: $additionalContent === [] ? null : (string) json_encode($additionalContent)
                     );
 
