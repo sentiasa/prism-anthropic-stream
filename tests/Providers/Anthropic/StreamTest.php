@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Providers\Anthropic;
 
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
@@ -177,7 +178,7 @@ it('can process streams with text that includes citations', function (): void {
 });
 
 describe('thinking', function (): void {
-    it('can process streams with thinking enabled', function (): void {
+    it('can process streams with thinking enabled and adds thinking and signature to the last chunk', function (): void {
         FixtureResponse::fakeStreamResponses('v1/messages', 'anthropic/stream-with-extended-thinking');
 
         $response = Prism::text()
@@ -187,32 +188,21 @@ describe('thinking', function (): void {
             ->asStream();
 
         $chunks = [];
-        $foundThinking = false;
 
         foreach ($response as $chunk) {
             $chunks[] = $chunk;
-
-            // Check if thinking content exists in any chunk
-            if ($chunk->content !== null) {
-                $contentData = json_decode($chunk->content, true);
-                if (isset($contentData['thinking'])) {
-                    $foundThinking = true;
-                }
-            }
         }
 
         expect($chunks)->not->toBeEmpty();
-        expect($foundThinking)->toBeTrue('No thinking content found in any chunk');
 
         $lastChunk = end($chunks);
-        expect($lastChunk->content)->not->toBeNull('Last chunk should have content');
 
-        $lastChunkData = json_decode($lastChunk->content, true);
+        expect($lastChunk->additionalContent)->not->toBeEmpty();
 
-        expect($lastChunkData)->toHaveKey('thinking');
-        expect($lastChunkData['thinking'])->toContain('The question is asking about');
+        expect($lastChunk->additionalContent)->toHaveKey('thinking');
+        expect($lastChunk->additionalContent['thinking'])->toContain('The question is asking about');
 
-        expect($lastChunkData)->toHaveKey('thinking_signature');
+        expect($lastChunk->additionalContent)->toHaveKey('thinking_signature');
 
         Http::assertSent(function (Request $request): bool {
             $body = json_decode($request->body(), true);
@@ -223,6 +213,28 @@ describe('thinking', function (): void {
                 && isset($body['thinking']['budget_tokens'])
                 && $body['thinking']['budget_tokens'] === config('prism.anthropic.default_thinking_budget', 1024);
         });
+    });
+
+    it('yields thinking chunks with a chunkType of thinking', function (): void {
+        FixtureResponse::fakeStreamResponses('v1/messages', 'anthropic/stream-with-extended-thinking');
+
+        $response = Prism::text()
+            ->using(Provider::Anthropic, 'claude-3-7-sonnet-20250219')
+            ->withPrompt('What is the meaning of life?')
+            ->withProviderMeta(Provider::Anthropic, ['thinking' => ['enabled' => true]])
+            ->asStream();
+
+        $chunks = [];
+
+        foreach ($response as $chunk) {
+            $chunks[] = $chunk;
+        }
+
+        $thinkingChunks = (new Collection($chunks))->where('chunkType', ChunkType::Thinking);
+
+        expect($thinkingChunks->count())->toBeGreaterThan(0);
+
+        expect($thinkingChunks->first()->text)->not()->toBeEmpty();
     });
 
     it('can process streams with thinking enabled with custom budget', function (): void {

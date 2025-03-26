@@ -95,22 +95,22 @@ class Stream
             }
 
             $outcome = match ($chunk['type']) {
-                // A meta chunk with the request ID and model
+                // Returns a meta chunk with the request ID and model to yield
                 'message_start' => $this->handleMessageStart(response: $response, chunk: $chunk),
 
-                //
+                // States temporary content block state and adds any tool use to tool calls
                 'content_block_start' => $this->handleContentBlockStart($chunk),
 
-                //
+                // Adds text, thinking and tool inputs to state. For text and thinking, returns a chunk to yield.
                 'content_block_delta' => $this->handleContentBlockDelta($chunk),
 
-                //
+                // Resets temporary content block state
                 'content_block_stop' => $this->handleContentBlockStop(),
 
-                //
+                // Adds a citation to state
                 'citation_start' => $this->handleCitationStart($chunk),
 
-                //
+                // Handles a tool use if finish is tool use
                 'message_delta' => $this->handleMessageDelta($chunk, $request, $depth),
 
                 // Sends a final meta chunk with the final text, finish reason, meta and additionalContent
@@ -196,7 +196,8 @@ class Stream
 
                     return new Chunk(
                         text: $textDelta,
-                        finishReason: null
+                        finishReason: null,
+                        chunkType: ChunkType::Message
                     );
                 }
             }
@@ -215,19 +216,22 @@ class Stream
         } elseif ($this->tempContentBlockType === 'thinking') {
             if ($deltaType === 'thinking_delta') {
                 $thinkingDelta = data_get($chunk, 'delta.thinking', '');
-
                 if (empty($thinkingDelta)) {
                     $thinkingDelta = data_get($chunk, 'delta.thinking_delta.thinking', '');
                 }
-
                 $this->thinking .= $thinkingDelta;
-            } elseif ($deltaType === 'signature_delta') {
-                $signatureDelta = data_get($chunk, 'delta.signature', '');
 
+                return new Chunk(
+                    text: $thinkingDelta,
+                    finishReason: null,
+                    chunkType: ChunkType::Thinking
+                );
+            }
+            if ($deltaType === 'signature_delta') {
+                $signatureDelta = data_get($chunk, 'delta.signature', '');
                 if (empty($signatureDelta)) {
                     $signatureDelta = data_get($chunk, 'delta.signature_delta.signature', '');
                 }
-
                 $this->thinkingSignature .= $signatureDelta;
             }
         }
@@ -267,8 +271,6 @@ class Stream
             return $this->handleToolUseFinish($request, $depth);
         }
 
-        $additionalContent = $this->buildAdditionalContent();
-
         return new Chunk(
             text: $this->text,
             finishReason: $finishReason,
@@ -277,7 +279,7 @@ class Stream
                 model: $this->model,
                 rateLimits: $this->processRateLimits($response)
             ),
-            content: $additionalContent === [] ? null : (string) json_encode($additionalContent),
+            additionalContent: $this->buildAdditionalContent(),
             chunkType: ChunkType::Meta
         );
     }
@@ -382,7 +384,7 @@ class Stream
             text: '',
             toolCalls: $mappedToolCalls,
             finishReason: null,
-            content: $additionalContent === [] ? null : (string) json_encode($additionalContent)
+            additionalContent: $additionalContent
         );
 
         yield from $this->handleToolCalls($request, $mappedToolCalls, $depth, $additionalContent);
