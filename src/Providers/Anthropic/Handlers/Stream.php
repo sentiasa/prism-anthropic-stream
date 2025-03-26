@@ -13,7 +13,7 @@ use Prism\Prism\Enums\Provider;
 use Prism\Prism\Exceptions\PrismChunkDecodeException;
 use Prism\Prism\Exceptions\PrismException;
 use Prism\Prism\Exceptions\PrismRateLimitedException;
-use Prism\Prism\Providers\Anthropic\Concerns\ProcessesRateLimits;
+use Prism\Prism\Providers\Anthropic\Concerns\HandlesResponse;
 use Prism\Prism\Providers\Anthropic\Maps\FinishReasonMap;
 use Prism\Prism\Providers\Anthropic\Maps\MessageMap;
 use Prism\Prism\Providers\Anthropic\Maps\ToolChoiceMap;
@@ -29,7 +29,7 @@ use Throwable;
 
 class Stream
 {
-    use CallsTools, ProcessesRateLimits;
+    use CallsTools, HandlesResponse;
 
     protected string $text = '';
 
@@ -508,9 +508,10 @@ class Stream
                 ->throw()
                 ->post('messages', $payload);
         } catch (Throwable $e) {
-            if ($e instanceof RequestException && $e->response->getStatusCode() === 429) {
-                throw new PrismRateLimitedException($this->processRateLimits($e->response));
+            if ($e instanceof RequestException && in_array($e->response->getStatusCode(), [413, 429, 529])) {
+                $this->handleResponseExceptions($e->response);
             }
+
             throw PrismException::providerRequestError($request->model(), $e);
         }
     }
