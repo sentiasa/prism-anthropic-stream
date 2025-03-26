@@ -44,18 +44,18 @@ class Stream
      */
     protected array $toolCalls = [];
 
-    protected ?string $contentBlockType = null;
+    protected string $thinking = '';
 
-    protected ?int $contentBlockIndex = null;
-
-    protected ?string $thinking = null;
-
-    protected ?string $thinkingSignature = null;
+    protected string $thinkingSignature = '';
 
     /**
      * @var array<string, array<string, mixed>>
      */
     protected array $citations = [];
+
+    protected ?string $tempContentBlockType = null;
+
+    protected ?int $tempContentBlockIndex = null;
 
     public function __construct(protected PendingRequest $client) {}
 
@@ -154,32 +154,16 @@ class Stream
         );
     }
 
-    protected function resetState(): void
-    {
-        $this->model = '';
-        $this->requestId = '';
-        $this->text = '';
-        $this->toolCalls = [];
-        $this->contentBlockType = null;
-        $this->contentBlockIndex = null;
-        $this->thinking = null;
-        $this->thinkingSignature = null;
-        $this->citations = [];
-    }
-
     /**
      * @param  array<string, mixed>  $chunk
      */
     protected function handleContentBlockStart(array $chunk): void
     {
-        $this->contentBlockType = data_get($chunk, 'content_block.type');
-        $this->contentBlockIndex = (int) data_get($chunk, 'index');
+        $this->tempContentBlockType = data_get($chunk, 'content_block.type');
+        $this->tempContentBlockIndex = (int) data_get($chunk, 'index');
 
-        if ($this->contentBlockType === 'thinking') {
-            $this->thinking = '';
-            $this->thinkingSignature = '';
-        } elseif ($this->contentBlockType === 'tool_use') {
-            $index = $this->contentBlockIndex;
+        if ($this->tempContentBlockType === 'tool_use') {
+            $index = $this->tempContentBlockIndex;
             $this->toolCalls[$index] = [
                 'id' => data_get($chunk, 'content_block.id'),
                 'name' => data_get($chunk, 'content_block.name'),
@@ -195,7 +179,7 @@ class Stream
     {
         $deltaType = data_get($chunk, 'delta.type');
 
-        if ($this->contentBlockType === 'text') {
+        if ($this->tempContentBlockType === 'text') {
             if ($deltaType === 'text_delta') {
                 $textDelta = data_get($chunk, 'delta.text', '');
 
@@ -216,19 +200,19 @@ class Stream
                     );
                 }
             }
-        } elseif ($this->contentBlockType === 'tool_use' && $deltaType === 'input_json_delta') {
+        } elseif ($this->tempContentBlockType === 'tool_use' && $deltaType === 'input_json_delta') {
             $jsonDelta = data_get($chunk, 'delta.partial_json', '');
 
             if (empty($jsonDelta)) {
                 $jsonDelta = data_get($chunk, 'delta.input_json_delta.partial_json', '');
             }
 
-            if ($this->contentBlockIndex !== null && isset($this->toolCalls[$this->contentBlockIndex])) {
-                $this->toolCalls[$this->contentBlockIndex]['input'] .= $jsonDelta;
+            if ($this->tempContentBlockIndex !== null && isset($this->toolCalls[$this->tempContentBlockIndex])) {
+                $this->toolCalls[$this->tempContentBlockIndex]['input'] .= $jsonDelta;
             }
 
             return null;
-        } elseif ($this->contentBlockType === 'thinking') {
+        } elseif ($this->tempContentBlockType === 'thinking') {
             if ($deltaType === 'thinking_delta') {
                 $thinkingDelta = data_get($chunk, 'delta.thinking', '');
 
@@ -253,8 +237,8 @@ class Stream
 
     protected function handleContentBlockStop(): void
     {
-        $this->contentBlockType = null;
-        $this->contentBlockIndex = null;
+        $this->tempContentBlockType = null;
+        $this->tempContentBlockIndex = null;
     }
 
     /**
@@ -364,7 +348,7 @@ class Stream
     {
         $additionalContent = [];
 
-        if ($this->thinking !== null) {
+        if ($this->thinking !== '' && $this->thinking !== '0') {
             $additionalContent['thinking'] = $this->thinking;
 
             if ($this->thinkingSignature !== null) {
@@ -511,12 +495,8 @@ class Stream
      * @throws PrismException
      * @throws PrismRateLimitedException
      */
-    protected function handleToolCalls(
-        Request $request,
-        array $toolCalls,
-        int $depth,
-        ?array $additionalContent = null
-    ): Generator {
+    protected function handleToolCalls(Request $request, array $toolCalls, int $depth, ?array $additionalContent = null): Generator
+    {
         $toolResults = $this->callTools($request->tools(), $toolCalls);
 
         $request->addMessage(new AssistantMessage($this->text, $toolCalls, $additionalContent ?? []));
@@ -590,5 +570,19 @@ class Stream
         }
 
         return $buffer;
+    }
+
+    protected function resetState(): void
+    {
+        $this->model = '';
+        $this->requestId = '';
+        $this->text = '';
+        $this->toolCalls = [];
+        $this->thinking = '';
+        $this->thinkingSignature = '';
+        $this->citations = [];
+
+        $this->tempContentBlockType = null;
+        $this->tempContentBlockIndex = null;
     }
 }
