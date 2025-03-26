@@ -12,15 +12,11 @@ use InvalidArgumentException;
 use Pest\Support\Arr;
 use Prism\Prism\Concerns\CallsTools;
 use Prism\Prism\Enums\ChunkType;
-use Prism\Prism\Enums\Provider;
 use Prism\Prism\Exceptions\PrismChunkDecodeException;
 use Prism\Prism\Exceptions\PrismException;
 use Prism\Prism\Exceptions\PrismRateLimitedException;
 use Prism\Prism\Providers\Anthropic\Concerns\HandlesResponse;
 use Prism\Prism\Providers\Anthropic\Maps\FinishReasonMap;
-use Prism\Prism\Providers\Anthropic\Maps\MessageMap;
-use Prism\Prism\Providers\Anthropic\Maps\ToolChoiceMap;
-use Prism\Prism\Providers\Anthropic\Maps\ToolMap;
 use Prism\Prism\Providers\Anthropic\ValueObjects\MessagePartWithCitations;
 use Prism\Prism\Text\Chunk;
 use Prism\Prism\Text\Request;
@@ -489,30 +485,13 @@ class Stream
     protected function sendRequest(Request $request): Response
     {
         try {
-            $payload = array_filter([
-                'stream' => true,
-                'model' => $request->model(),
-                'system' => MessageMap::mapSystemMessages($request->systemPrompts()),
-                'messages' => MessageMap::map($request->messages(), $request->providerMeta(Provider::Anthropic)),
-                'thinking' => $request->providerMeta(Provider::Anthropic, 'thinking.enabled') === true
-                    ? [
-                        'type' => 'enabled',
-                        'budget_tokens' => is_int($request->providerMeta(Provider::Anthropic, 'thinking.budgetTokens'))
-                            ? $request->providerMeta(Provider::Anthropic, 'thinking.budgetTokens')
-                            : config('prism.anthropic.default_thinking_budget', 1024),
-                    ]
-                    : null,
-                'max_tokens' => $request->maxTokens(),
-                'temperature' => $request->temperature(),
-                'top_p' => $request->topP(),
-                'tools' => ToolMap::map($request->tools()),
-                'tool_choice' => ToolChoiceMap::map($request->toolChoice()),
-            ]);
-
             return $this->client
                 ->withOptions(['stream' => true])
                 ->throw()
-                ->post('messages', $payload);
+                ->post('messages', array_filter([
+                    'stream' => true,
+                    ...Text::buildHttpRequestPayload($request),
+                ]));
         } catch (Throwable $e) {
             if ($e instanceof RequestException && in_array($e->response->getStatusCode(), [413, 429, 529])) {
                 $this->handleResponseExceptions($e->response);
