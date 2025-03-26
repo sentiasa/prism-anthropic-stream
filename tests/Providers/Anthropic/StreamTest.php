@@ -15,6 +15,10 @@ use Prism\Prism\Exceptions\PrismRateLimitedException;
 use Prism\Prism\Exceptions\PrismRequestTooLargeException;
 use Prism\Prism\Facades\Tool;
 use Prism\Prism\Prism;
+use Prism\Prism\Providers\Anthropic\ValueObjects\Citation;
+use Prism\Prism\Providers\Anthropic\ValueObjects\MessagePartWithCitations;
+use Prism\Prism\ValueObjects\Messages\Support\Document;
+use Prism\Prism\ValueObjects\Messages\UserMessage;
 use Prism\Prism\ValueObjects\ProviderRateLimit;
 use Tests\Fixtures\FixtureResponse;
 
@@ -147,33 +151,75 @@ describe('tools', function (): void {
     });
 });
 
-it('can process streams with text that includes citations', function (): void {
-    FixtureResponse::fakeStreamResponses('v1/messages', 'anthropic/stream-with-citations');
+describe('citations', function (): void {
+    it('adds citations to additionalContent on the last chunk when enabled', function (): void {
+        FixtureResponse::fakeStreamResponses('v1/messages', 'anthropic/stream-with-citations');
 
-    $response = Prism::text()
-        ->using(Provider::Anthropic, 'claude-3-7-sonnet-20250219')
-        ->withPrompt('Tell me about the benefits of exercise with citations')
-        ->asStream();
+        $response = Prism::text()
+            ->using(Provider::Anthropic, 'claude-3-7-sonnet-20250219')
+            ->withProviderMeta(Provider::Anthropic, ['citations' => true])
+            ->withMessages([
+                (new UserMessage(
+                    content: 'What color is the grass and sky?',
+                    additionalContent: [
+                        Document::fromText('The grass is green. The sky is blue.'),
+                    ]
+                )),
+            ])
+            ->asStream();
 
-    $text = '';
-    $chunks = [];
+        $text = '';
+        $chunks = [];
 
-    foreach ($response as $chunk) {
-        $chunks[] = $chunk;
-        $text .= $chunk->text;
-    }
+        foreach ($response as $chunk) {
+            $chunks[] = $chunk;
+            $text .= $chunk->text;
+        }
 
-    expect($chunks)->not->toBeEmpty();
-    expect($text)->not->toBeEmpty();
-    // Check that text contains citation-like patterns
-    expect($text)->toContain('et al', '2006');
+        $lastChunk = end($chunks);
 
-    // Verify the HTTP request
-    Http::assertSent(function (Request $request): bool {
-        $body = json_decode($request->body(), true);
+        expect($lastChunk->additionalContent)->toHaveKey('messagePartsWithCitations');
+        expect($lastChunk->additionalContent['messagePartsWithCitations'])->toBeArray();
+        expect($lastChunk->additionalContent['messagePartsWithCitations'])->toHaveCount(2);
+        expect($lastChunk->additionalContent['messagePartsWithCitations'][0])->toBeInstanceOf(MessagePartWithCitations::class);
+        expect($lastChunk->additionalContent['messagePartsWithCitations'][0]->text)->not()->toBeEmpty();
+        expect($lastChunk->additionalContent['messagePartsWithCitations'][0]->citations)->toHaveCount(1);
+        expect($lastChunk->additionalContent['messagePartsWithCitations'][0]->citations[0])->toBeInstanceOf(Citation::class);
 
-        return $request->url() === 'https://api.anthropic.com/v1/messages'
-            && $body['stream'] === true;
+        $correspondingChunk = (new Collection($chunks))->firstWhere('text', $lastChunk->additionalContent['messagePartsWithCitations'][0]->text);
+        expect($correspondingChunk->additionalContent)->toHaveKey('citationIndex');
+        expect($correspondingChunk->additionalContent['citationIndex'])->toBe(0);
+    });
+
+    it('adds a citations index to the corresponding text chunk additionalContent', function (): void {
+        FixtureResponse::fakeStreamResponses('v1/messages', 'anthropic/stream-with-citations');
+
+        $response = Prism::text()
+            ->using(Provider::Anthropic, 'claude-3-7-sonnet-20250219')
+            ->withProviderMeta(Provider::Anthropic, ['citations' => true])
+            ->withMessages([
+                (new UserMessage(
+                    content: 'What color is the grass and sky?',
+                    additionalContent: [
+                        Document::fromText('The grass is green. The sky is blue.'),
+                    ]
+                )),
+            ])
+            ->asStream();
+
+        $text = '';
+        $chunks = [];
+
+        foreach ($response as $chunk) {
+            $chunks[] = $chunk;
+            $text .= $chunk->text;
+        }
+
+        $lastChunk = end($chunks);
+
+        $correspondingChunk = (new Collection($chunks))->firstWhere('text', $lastChunk->additionalContent['messagePartsWithCitations'][0]->text);
+        expect($correspondingChunk->additionalContent)->toHaveKey('citationIndex');
+        expect($correspondingChunk->additionalContent['citationIndex'])->toBe(0);
     });
 });
 

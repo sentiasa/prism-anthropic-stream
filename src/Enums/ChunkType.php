@@ -7,7 +7,6 @@ namespace Prism\Prism\Enums;
 enum ChunkType
 {
     case Message;
-    case Citation;
     case Thinking;
     case Meta;
 }

@@ -8,6 +8,8 @@ use Generator;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
+use InvalidArgumentException;
+use Pest\Support\Arr;
 use Prism\Prism\Concerns\CallsTools;
 use Prism\Prism\Enums\ChunkType;
 use Prism\Prism\Enums\Provider;
@@ -49,13 +51,18 @@ class Stream
     protected string $thinkingSignature = '';
 
     /**
-     * @var array<string, array<string, mixed>>
+     * @var MessagePartWithCitations[]
      */
     protected array $citations = [];
 
     protected ?string $tempContentBlockType = null;
 
     protected ?int $tempContentBlockIndex = null;
+
+    /**
+     * @var array<string,mixed>|null
+     */
+    protected ?array $tempCitation = null;
 
     public function __construct(protected PendingRequest $client) {}
 
@@ -106,9 +113,6 @@ class Stream
 
                 // Resets temporary content block state
                 'content_block_stop' => $this->handleContentBlockStop(),
-
-                // Adds a citation to state
-                'citation_start' => $this->handleCitationStart($chunk),
 
                 // Handles a tool use if finish is tool use
                 'message_delta' => $this->handleMessageDelta($chunk, $request, $depth),
@@ -164,6 +168,7 @@ class Stream
 
         if ($this->tempContentBlockType === 'tool_use') {
             $index = $this->tempContentBlockIndex;
+
             $this->toolCalls[$index] = [
                 'id' => data_get($chunk, 'content_block.id'),
                 'name' => data_get($chunk, 'content_block.name'),
@@ -194,14 +199,32 @@ class Stream
                 if (! empty($textDelta)) {
                     $this->text .= $textDelta;
 
+                    $additionalContent = [];
+
+                    if ($this->tempCitation !== null) {
+                        $this->citations[] = MessagePartWithCitations::fromContentBlock([
+                            'text' => $textDelta,
+                            'citations' => [$this->tempCitation],
+                        ]);
+
+                        $additionalContent['citationIndex'] = array_key_last($this->citations);
+                    }
+
                     return new Chunk(
                         text: $textDelta,
                         finishReason: null,
-                        chunkType: ChunkType::Message
+                        chunkType: ChunkType::Message,
+                        additionalContent: $additionalContent
                     );
                 }
             }
-        } elseif ($this->tempContentBlockType === 'tool_use' && $deltaType === 'input_json_delta') {
+
+            if ($deltaType === 'citations_delta') {
+                $this->tempCitation = $this->extractCitationsFromChunk($chunk);
+            }
+        }
+
+        if ($this->tempContentBlockType === 'tool_use' && $deltaType === 'input_json_delta') {
             $jsonDelta = data_get($chunk, 'delta.partial_json', '');
 
             if (empty($jsonDelta)) {
@@ -213,12 +236,16 @@ class Stream
             }
 
             return null;
-        } elseif ($this->tempContentBlockType === 'thinking') {
+        }
+
+        if ($this->tempContentBlockType === 'thinking') {
             if ($deltaType === 'thinking_delta') {
                 $thinkingDelta = data_get($chunk, 'delta.thinking', '');
+
                 if (empty($thinkingDelta)) {
                     $thinkingDelta = data_get($chunk, 'delta.thinking_delta.thinking', '');
                 }
+
                 $this->thinking .= $thinkingDelta;
 
                 return new Chunk(
@@ -228,10 +255,13 @@ class Stream
                 );
             }
             if ($deltaType === 'signature_delta') {
+
                 $signatureDelta = data_get($chunk, 'delta.signature', '');
+
                 if (empty($signatureDelta)) {
                     $signatureDelta = data_get($chunk, 'delta.signature_delta.signature', '');
                 }
+
                 $this->thinkingSignature .= $signatureDelta;
             }
         }
@@ -243,6 +273,7 @@ class Stream
     {
         $this->tempContentBlockType = null;
         $this->tempContentBlockIndex = null;
+        $this->tempCitation = null;
     }
 
     /**
@@ -285,72 +316,13 @@ class Stream
     }
 
     /**
-     * @param  array<string, mixed>  $chunk
-     */
-    protected function handleCitationStart(array $chunk): void
-    {
-        $citationId = data_get($chunk, 'citation.id');
-
-        if (empty($citationId)) {
-            return;
-        }
-
-        $this->citations[$citationId] = [
-            'id' => $citationId,
-            'start_index' => data_get($chunk, 'citation.start_index'),
-            'end_index' => data_get($chunk, 'citation.end_index'),
-            'text' => data_get($chunk, 'citation.text', ''),
-            'urls' => data_get($chunk, 'citation.urls', []),
-        ];
-    }
-
-    /**
-     * @return array<int, MessagePartWithCitations>|null
-     */
-    protected function extractCitationsFromStream(): ?array
-    {
-        if ($this->citations === []) {
-            return null;
-        }
-
-        $contentBlock = [
-            'type' => 'text',
-            'text' => $this->text,
-            'citations' => $this->streamCitationsToAnthropicFormat(),
-        ];
-
-        return [MessagePartWithCitations::fromContentBlock($contentBlock)];
-    }
-
-    /**
-     * @return array<int, array<string, mixed>>
-     */
-    protected function streamCitationsToAnthropicFormat(): array
-    {
-        $result = [];
-
-        foreach ($this->citations as $citation) {
-            $result[] = [
-                'type' => 'char_location',
-                'cited_text' => $citation['text'],
-                'start_char_index' => $citation['start_index'],
-                'end_char_index' => $citation['end_index'],
-                'document_index' => 0,
-                'document_title' => null,
-            ];
-        }
-
-        return $result;
-    }
-
-    /**
      * @return array<string, mixed>
      */
     protected function buildAdditionalContent(): array
     {
         $additionalContent = [];
 
-        if ($this->thinking !== '' && $this->thinking !== '0') {
+        if ($this->thinking !== '') {
             $additionalContent['thinking'] = $this->thinking;
 
             if ($this->thinkingSignature !== null) {
@@ -359,10 +331,7 @@ class Stream
         }
 
         if ($this->citations !== []) {
-            $messagePartsWithCitations = $this->extractCitationsFromStream();
-            if ($messagePartsWithCitations !== null) {
-                $additionalContent['messagePartsWithCitations'] = $messagePartsWithCitations;
-            }
+            $additionalContent['messagePartsWithCitations'] = $this->citations;
         }
 
         return $additionalContent;
@@ -572,6 +541,30 @@ class Stream
         }
 
         return $buffer;
+    }
+
+    /**
+     * @param  array<string,mixed>  $chunk
+     * @return array<string,mixed>
+     */
+    protected function extractCitationsFromChunk(array $chunk): array
+    {
+        $citation = data_get($chunk, 'delta.citation', null);
+
+        if (Arr::has($citation, 'start_page_number')) {
+            $type = 'page_location';
+        } elseif (Arr::has($citation, 'start_char_index')) {
+            $type = 'char_location';
+        } elseif (Arr::has($citation, 'start_block_index')) {
+            $type = 'content_block_location';
+        } else {
+            throw new InvalidArgumentException('Citation type could not be detected from signature.');
+        }
+
+        return [
+            'type' => $type,
+            ...$citation,
+        ];
     }
 
     protected function resetState(): void
