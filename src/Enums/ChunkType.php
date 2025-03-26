@@ -1,0 +1,13 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Prism\Prism\Enums;
+
+enum ChunkType
+{
+    case Message;
+    case Citation;
+    case Thinking;
+    case Meta;
+}

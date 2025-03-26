@@ -9,6 +9,7 @@ use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Prism\Prism\Concerns\CallsTools;
+use Prism\Prism\Enums\ChunkType;
 use Prism\Prism\Enums\Provider;
 use Prism\Prism\Exceptions\PrismChunkDecodeException;
 use Prism\Prism\Exceptions\PrismException;
@@ -93,68 +94,38 @@ class Stream
                 continue;
             }
 
-            switch ($chunk['type']) {
-                case 'ping':
-                    break;
+            $outcome = match ($chunk['type']) {
+                // A meta chunk with the request ID and model
+                'message_start' => $this->handleMessageStart(response: $response, chunk: $chunk),
 
-                case 'message_start':
-                    $this->model = data_get($chunk, 'message.model', '');
-                    $this->requestId = data_get($chunk, 'message.id', '');
-                    break;
+                //
+                'content_block_start' => $this->handleContentBlockStart($chunk),
 
-                case 'content_block_start':
-                    $this->handleContentBlockStart($chunk);
-                    break;
+                //
+                'content_block_delta' => $this->handleContentBlockDelta($chunk),
 
-                case 'content_block_delta':
-                    $chunkResult = $this->handleContentBlockDelta($chunk);
-                    if ($chunkResult instanceof Chunk) {
-                        yield $chunkResult;
-                    }
-                    break;
+                //
+                'content_block_stop' => $this->handleContentBlockStop(),
 
-                case 'content_block_stop':
-                    $this->contentBlockType = null;
-                    $this->contentBlockIndex = null;
-                    break;
+                //
+                'citation_start' => $this->handleCitationStart($chunk),
 
-                case 'citation_start':
-                    $this->handleCitationStart($chunk);
-                    break;
+                //
+                'message_delta' => $this->handleMessageDelta($chunk, $request, $depth),
 
-                case 'message_delta':
-                    $stopReason = data_get($chunk, 'delta.stop_reason');
-                    if ($stopReason === 'tool_use' && $this->toolCalls !== []) {
-                        yield from $this->handleToolUseFinish($request, $depth);
+                // Sends a final meta chunk with the final text, finish reason, meta and additionalContent
+                'message_stop' => $this->handleMessageStop($chunk, $response, $request, $depth),
 
-                        return;
-                    }
-                    break;
+                // E.g. ping
+                default => null
+            };
 
-                case 'message_stop':
-                    $stopReason = data_get($chunk, 'stop_reason', '');
-                    $finishReason = FinishReasonMap::map($stopReason);
+            if ($outcome instanceof Generator) {
+                yield from $outcome;
+            }
 
-                    if ($stopReason === 'tool_use' && $this->toolCalls !== []) {
-                        yield from $this->handleToolUseFinish($request, $depth);
-
-                        return;
-                    }
-
-                    $additionalContent = $this->buildAdditionalContent();
-
-                    yield new Chunk(
-                        text: '',
-                        finishReason: $finishReason,
-                        meta: new Meta(
-                            id: $this->requestId,
-                            model: $this->model,
-                            rateLimits: $this->processRateLimits($response)
-                        ),
-                        content: $additionalContent === [] ? null : (string) json_encode($additionalContent)
-                    );
-
-                    return;
+            if ($outcome instanceof Chunk) {
+                yield $outcome;
             }
         }
 
@@ -163,8 +134,30 @@ class Stream
         }
     }
 
+    /**
+     * @param  array<string,mixed>  $chunk
+     */
+    protected function handleMessageStart(Response $response, array $chunk): Chunk
+    {
+        $this->model = data_get($chunk, 'message.model', '');
+        $this->requestId = data_get($chunk, 'message.id', '');
+
+        return new Chunk(
+            text: '',
+            finishReason: null,
+            meta: new Meta(
+                id: $this->requestId,
+                model: $this->model,
+                rateLimits: $this->processRateLimits($response)
+            ),
+            chunkType: ChunkType::Meta
+        );
+    }
+
     protected function resetState(): void
     {
+        $this->model = '';
+        $this->requestId = '';
         $this->text = '';
         $this->toolCalls = [];
         $this->contentBlockType = null;
@@ -256,6 +249,53 @@ class Stream
         }
 
         return null;
+    }
+
+    protected function handleContentBlockStop(): void
+    {
+        $this->contentBlockType = null;
+        $this->contentBlockIndex = null;
+    }
+
+    /**
+     * @param  array<string,mixed>  $chunk
+     */
+    protected function handleMessageDelta(array $chunk, Request $request, int $depth): ?Generator
+    {
+        $stopReason = data_get($chunk, 'delta.stop_reason');
+
+        if ($stopReason === 'tool_use' && $this->toolCalls !== []) {
+            return $this->handleToolUseFinish($request, $depth);
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  array<string,mixed>  $chunk
+     */
+    protected function handleMessageStop(array $chunk, Response $response, Request $request, int $depth): Generator|Chunk
+    {
+        $stopReason = data_get($chunk, 'stop_reason', '');
+        $finishReason = FinishReasonMap::map($stopReason);
+
+        if ($stopReason === 'tool_use' && $this->toolCalls !== []) {
+            return $this->handleToolUseFinish($request, $depth);
+        }
+
+        $additionalContent = $this->buildAdditionalContent();
+
+        return new Chunk(
+            text: $this->text,
+            finishReason: $finishReason,
+            meta: new Meta(
+                id: $this->requestId,
+                model: $this->model,
+                rateLimits: $this->processRateLimits($response)
+            ),
+            content: $additionalContent === [] ? null : (string) json_encode($additionalContent),
+            chunkType: ChunkType::Meta
+        );
     }
 
     /**

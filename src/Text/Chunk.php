@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Prism\Prism\Text;
 
+use Prism\Prism\Enums\ChunkType;
 use Prism\Prism\Enums\FinishReason;
 use Prism\Prism\ValueObjects\Meta;
 use Prism\Prism\ValueObjects\ToolCall;
@@ -22,5 +23,6 @@ readonly class Chunk
         public ?FinishReason $finishReason = null,
         public ?Meta $meta = null,
         public ?string $content = null,
+        public ChunkType $chunkType = ChunkType::Message
     ) {}
 }
