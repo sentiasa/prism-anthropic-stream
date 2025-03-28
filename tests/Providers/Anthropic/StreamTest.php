@@ -9,6 +9,7 @@ use Illuminate\Http\Client\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
 use Prism\Prism\Enums\ChunkType;
+use Prism\Prism\Enums\FinishReason;
 use Prism\Prism\Enums\Provider;
 use Prism\Prism\Exceptions\PrismProviderOverloadedException;
 use Prism\Prism\Exceptions\PrismRateLimitedException;
@@ -44,6 +45,7 @@ it('can generate text with a basic stream', function (): void {
 
     expect($chunks)->not->toBeEmpty();
     expect($text)->not->toBeEmpty();
+    expect(end($chunks)->finishReason)->toBe(FinishReason::Stop);
 
     // Verify the HTTP request
     Http::assertSent(function (Request $request): bool {
@@ -100,6 +102,7 @@ describe('tools', function (): void {
 
         expect($chunks)->not->toBeEmpty();
         expect($toolCallFound)->toBeTrue('Expected to find at least one tool call in the stream');
+        expect(end($chunks)->finishReason)->toBe(FinishReason::Stop);
 
         // Verify the HTTP request
         Http::assertSent(function (Request $request): bool {
@@ -189,6 +192,7 @@ describe('citations', function (): void {
         $correspondingChunk = (new Collection($chunks))->firstWhere('text', $lastChunk->additionalContent['messagePartsWithCitations'][0]->text);
         expect($correspondingChunk->additionalContent)->toHaveKey('citationIndex');
         expect($correspondingChunk->additionalContent['citationIndex'])->toBe(0);
+        expect($lastChunk->finishReason)->toBe(FinishReason::Stop);
     });
 
     it('adds a citations index to the corresponding text chunk additionalContent', function (): void {

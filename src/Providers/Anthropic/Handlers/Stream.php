@@ -12,6 +12,7 @@ use InvalidArgumentException;
 use Pest\Support\Arr;
 use Prism\Prism\Concerns\CallsTools;
 use Prism\Prism\Enums\ChunkType;
+use Prism\Prism\Enums\FinishReason;
 use Prism\Prism\Exceptions\PrismChunkDecodeException;
 use Prism\Prism\Exceptions\PrismException;
 use Prism\Prism\Exceptions\PrismRateLimitedException;
@@ -59,6 +60,8 @@ class Stream
      * @var array<string,mixed>|null
      */
     protected ?array $tempCitation = null;
+
+    protected string $stopReason = '';
 
     public function __construct(protected PendingRequest $client) {}
 
@@ -114,7 +117,7 @@ class Stream
                 'message_delta' => $this->handleMessageDelta($chunk, $request, $depth),
 
                 // Sends a final meta chunk with the final text, finish reason, meta and additionalContent
-                'message_stop' => $this->handleMessageStop($chunk, $response, $request, $depth),
+                'message_stop' => $this->handleMessageStop($response, $request, $depth),
 
                 // E.g. ping
                 default => null
@@ -277,9 +280,9 @@ class Stream
      */
     protected function handleMessageDelta(array $chunk, Request $request, int $depth): ?Generator
     {
-        $stopReason = data_get($chunk, 'delta.stop_reason');
+        $this->stopReason = data_get($chunk, 'delta.stop_reason', $this->stopReason);
 
-        if ($stopReason === 'tool_use' && $this->toolCalls !== []) {
+        if ($this->stopReason === 'tool_use' && $this->toolCalls !== []) {
             return $this->handleToolUseFinish($request, $depth);
         }
 
@@ -287,20 +290,19 @@ class Stream
     }
 
     /**
-     * @param  array<string,mixed>  $chunk
+     * @throws PrismChunkDecodeException
+     * @throws PrismException
+     * @throws PrismRateLimitedException
      */
-    protected function handleMessageStop(array $chunk, Response $response, Request $request, int $depth): Generator|Chunk
+    protected function handleMessageStop(Response $response, Request $request, int $depth): Generator|Chunk
     {
-        $stopReason = data_get($chunk, 'stop_reason', '');
-        $finishReason = FinishReasonMap::map($stopReason);
-
-        if ($stopReason === 'tool_use' && $this->toolCalls !== []) {
+        if ($this->stopReason === 'tool_use' && $this->toolCalls !== []) {
             return $this->handleToolUseFinish($request, $depth);
         }
 
         return new Chunk(
             text: $this->text,
-            finishReason: $finishReason,
+            finishReason: FinishReasonMap::map($this->stopReason),
             meta: new Meta(
                 id: $this->requestId,
                 model: $this->model,
@@ -555,6 +557,7 @@ class Stream
         $this->thinking = '';
         $this->thinkingSignature = '';
         $this->citations = [];
+        $this->stopReason = '';
 
         $this->tempContentBlockType = null;
         $this->tempContentBlockIndex = null;
