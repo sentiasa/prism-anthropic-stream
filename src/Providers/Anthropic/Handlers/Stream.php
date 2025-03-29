@@ -14,6 +14,7 @@ use Prism\Prism\Concerns\CallsTools;
 use Prism\Prism\Enums\ChunkType;
 use Prism\Prism\Exceptions\PrismChunkDecodeException;
 use Prism\Prism\Exceptions\PrismException;
+use Prism\Prism\Exceptions\PrismProviderOverloadedException;
 use Prism\Prism\Exceptions\PrismRateLimitedException;
 use Prism\Prism\Providers\Anthropic\Concerns\HandlesResponse;
 use Prism\Prism\Providers\Anthropic\Maps\FinishReasonMap;
@@ -117,6 +118,8 @@ class Stream
 
                 // Sends a final meta chunk with the final text, finish reason, meta and additionalContent
                 'message_stop' => $this->handleMessageStop($response, $request, $depth),
+
+                'error' => $this->handleError($chunk),
 
                 // E.g. ping
                 default => null
@@ -560,5 +563,19 @@ class Stream
 
         $this->tempContentBlockType = null;
         $this->tempContentBlockIndex = null;
+    }
+    /**
+     * @throws PrismProviderOverloadedException
+     * @throws PrismException
+     */
+    protected function handleError(array $chunk): void
+    {
+        throw PrismException::providerResponseError(vsprintf(
+            'Anthropic Error: [%s] %s',
+            [
+                data_get($chunk, 'error.type', 'unknown'),
+                data_get($chunk, 'error.message'),
+            ]
+        ));
     }
 }
