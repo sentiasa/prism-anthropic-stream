@@ -564,12 +564,17 @@ class Stream
         $this->tempContentBlockType = null;
         $this->tempContentBlockIndex = null;
     }
+
     /**
      * @throws PrismProviderOverloadedException
      * @throws PrismException
      */
     protected function handleError(array $chunk): void
     {
+        if (data_get($chunk, 'error.type') === 'overloaded_error') {
+            throw new PrismProviderOverloadedException('Anthropic');
+        }
+
         throw PrismException::providerResponseError(vsprintf(
             'Anthropic Error: [%s] %s',
             [
