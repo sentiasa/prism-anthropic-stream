@@ -566,7 +566,8 @@ class Stream
     }
 
     /**
-     * @param array<string, mixed> $chunk
+     * @param  array<string, mixed>  $chunk
+     *
      * @throws PrismProviderOverloadedException
      * @throws PrismException
      */
