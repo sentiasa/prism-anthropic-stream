@@ -6,7 +6,7 @@ Getting started with Prism is a breeze.
 
 Before we dive in, make sure your project meets these requirements:
 
-- PHP 8.3 or higher
+- PHP 8.2 or higher
 - Laravel 11.0 or higher
 
 ## Step 1: Composer Installation
