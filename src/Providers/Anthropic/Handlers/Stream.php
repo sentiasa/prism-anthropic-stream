@@ -12,6 +12,7 @@ use InvalidArgumentException;
 use Pest\Support\Arr;
 use Prism\Prism\Concerns\CallsTools;
 use Prism\Prism\Enums\ChunkType;
+use Prism\Prism\Enums\FinishReason;
 use Prism\Prism\Exceptions\PrismChunkDecodeException;
 use Prism\Prism\Exceptions\PrismException;
 use Prism\Prism\Exceptions\PrismProviderOverloadedException;
@@ -21,10 +22,14 @@ use Prism\Prism\Providers\Anthropic\Maps\FinishReasonMap;
 use Prism\Prism\Providers\Anthropic\ValueObjects\MessagePartWithCitations;
 use Prism\Prism\Text\Chunk;
 use Prism\Prism\Text\Request;
+use Prism\Prism\Text\ResponseBuilder;
+use Prism\Prism\Text\Step;
 use Prism\Prism\ValueObjects\Messages\AssistantMessage;
 use Prism\Prism\ValueObjects\Messages\ToolResultMessage;
 use Prism\Prism\ValueObjects\Meta;
 use Prism\Prism\ValueObjects\ToolCall;
+use Prism\Prism\ValueObjects\ToolResult;
+use Prism\Prism\ValueObjects\Usage;
 use Psr\Http\Message\StreamInterface;
 use Throwable;
 
@@ -63,7 +68,12 @@ class Stream
 
     protected string $stopReason = '';
 
-    public function __construct(protected PendingRequest $client) {}
+    protected ResponseBuilder $responseBuilder;
+
+    public function __construct(protected PendingRequest $client)
+    {
+        $this->responseBuilder = new ResponseBuilder;
+    }
 
     /**
      * @return Generator<Chunk>
@@ -74,6 +84,7 @@ class Stream
      */
     public function handle(Request $request): Generator
     {
+        $this->resetState();
         $response = $this->sendRequest($request);
 
         yield from $this->processStream($response, $request);
@@ -87,8 +98,6 @@ class Stream
      */
     protected function processStream(Response $response, Request $request, int $depth = 0): Generator
     {
-        $this->resetState();
-
         if ($depth >= $request->maxSteps()) {
             throw new PrismException('Maximum tool call chain depth exceeded');
         }
@@ -214,8 +223,8 @@ class Stream
                     return new Chunk(
                         text: $textDelta,
                         finishReason: null,
-                        chunkType: ChunkType::Message,
-                        additionalContent: $additionalContent
+                        additionalContent: $additionalContent,
+                        chunkType: ChunkType::Message
                     );
                 }
             }
@@ -235,8 +244,6 @@ class Stream
             if ($this->tempContentBlockIndex !== null && isset($this->toolCalls[$this->tempContentBlockIndex])) {
                 $this->toolCalls[$this->tempContentBlockIndex]['input'] .= $jsonDelta;
             }
-
-            return null;
         }
 
         if ($this->tempContentBlockType === 'thinking') {
@@ -296,23 +303,41 @@ class Stream
      * @throws PrismException
      * @throws PrismRateLimitedException
      */
-    protected function handleMessageStop(Response $response, Request $request, int $depth): Generator|Chunk
+    protected function handleMessageStop(Response $response, Request $request, int $depth): Generator|Chunk|null
     {
         if ($this->stopReason === 'tool_use' && $this->toolCalls !== []) {
             return $this->handleToolUseFinish($request, $depth);
         }
 
-        return new Chunk(
-            text: $this->text,
-            finishReason: FinishReasonMap::map($this->stopReason),
-            meta: new Meta(
-                id: $this->requestId,
-                model: $this->model,
-                rateLimits: $this->processRateLimits($response)
-            ),
-            additionalContent: $this->buildAdditionalContent(),
-            chunkType: ChunkType::Meta
-        );
+        if ($depth === 0) {
+            $mappedToolCalls = $this->mapToolCalls();
+            $additionalContent = $this->buildAdditionalContent();
+
+            $this->addStep(
+                text: $this->text,
+                finishReason: $this->stopReason,
+                toolCalls: $mappedToolCalls,
+                request: $request,
+                additionalContent: $additionalContent
+            );
+
+            return new Chunk(
+                text: $this->text,
+                finishReason: FinishReasonMap::map($this->stopReason),
+                meta: new Meta(
+                    id: $this->requestId,
+                    model: $this->model,
+                    rateLimits: $this->processRateLimits($response)
+                ),
+                additionalContent: [
+                    ...$additionalContent,
+                    'steps' => $this->responseBuilder->steps,
+                ],
+                chunkType: ChunkType::Meta
+            );
+        }
+
+        return null;
     }
 
     /**
@@ -468,17 +493,46 @@ class Stream
      */
     protected function handleToolCalls(Request $request, array $toolCalls, int $depth, ?array $additionalContent = null): Generator
     {
-        $toolResults = $this->callTools($request->tools(), $toolCalls);
-
-        $request->addMessage(new AssistantMessage($this->text, $toolCalls, $additionalContent ?? []));
-        $request->addMessage(new ToolResultMessage($toolResults));
+        $mappedToolCalls = $this->mapToolCalls();
 
         yield new Chunk(
             text: '',
+            toolCalls: $mappedToolCalls,
+            chunkType: ChunkType::ToolCallStart
+        );
+
+        $toolResults = $this->callTools($request->tools(), $toolCalls);
+
+        $this->addStep(
+            text: $this->text,
+            finishReason: 'tool_use',
+            toolCalls: $toolCalls,
             toolResults: $toolResults,
+            request: $request,
+            additionalContent: $this->buildAdditionalContent()
+        );
+
+        $assistantMessage = new AssistantMessage($this->text, $toolCalls, $additionalContent ?? []);
+        $toolResultMessage = new ToolResultMessage($toolResults);
+
+        $request->addMessage($assistantMessage);
+        $request->addMessage($toolResultMessage);
+
+        $this->responseBuilder->addResponseMessage($assistantMessage);
+
+        yield new Chunk(
+            text: '',
+            toolCalls: $mappedToolCalls,
+            toolResults: $toolResults,
+            chunkType: ChunkType::ToolCallEnd
         );
 
         $nextResponse = $this->sendRequest($request);
+
+        // Reset text and tool calls before processing the next response
+        $this->text = '';
+        $this->toolCalls = [];
+
         yield from $this->processStream($nextResponse, $request, $depth + 1);
     }
 
@@ -503,6 +557,36 @@ class Stream
 
             throw PrismException::providerRequestError($request->model(), $e);
         }
+    }
+
+    /**
+     * @param  ToolCall[]  $toolCalls
+     * @param  ToolResult[]  $toolResults
+     * @param  array<string, mixed>|null  $additionalContent
+     */
+    protected function addStep(
+        string $text,
+        ?string $finishReason = null,
+        array $toolCalls = [],
+        array $toolResults = [],
+        ?Request $request = null,
+        ?array $additionalContent = null
+    ): void {
+        $this->responseBuilder->addStep(new Step(
+            text: $text,
+            finishReason: $finishReason ? FinishReasonMap::map($finishReason) : FinishReason::Unknown,
+            toolCalls: $toolCalls,
+            toolResults: $toolResults,
+            usage: new Usage(0, 0),
+            meta: new Meta(
+                id: $this->requestId,
+                model: $this->model,
+                rateLimits: []
+            ),
+            messages: $request instanceof \Prism\Prism\Text\Request ? $request->messages() : [],
+            systemPrompts: $request instanceof \Prism\Prism\Text\Request ? $request->systemPrompts() : [],
+            additionalContent: $additionalContent ?? $this->buildAdditionalContent()
+        ));
     }
 
     protected function readLine(StreamInterface $stream): string
@@ -563,6 +647,8 @@ class Stream
 
         $this->tempContentBlockType = null;
         $this->tempContentBlockIndex = null;
+
+        $this->responseBuilder = new ResponseBuilder;
     }
 
     /**
