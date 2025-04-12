@@ -211,7 +211,7 @@ class Stream
                 return new Chunk(
                     text: $textDelta,
                     finishReason: null,
-                    chunkType: ChunkType::Message,
+                    chunkType: ChunkType::Text,
                     additionalContent: $additionalContent
                 );
             }

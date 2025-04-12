@@ -24,6 +24,6 @@ readonly class Chunk
         public ?FinishReason $finishReason = null,
         public ?Meta $meta = null,
         public array $additionalContent = [],
-        public ChunkType $chunkType = ChunkType::Message
+        public ChunkType $chunkType = ChunkType::Text
     ) {}
 }
