@@ -6,6 +6,11 @@ namespace Prism\Prism\Providers\Anthropic\ValueObjects;
 
 class StreamState
 {
+    /**
+     * @param  array<int, array<string, mixed>>  $toolCalls
+     * @param  array<int, MessagePartWithCitations>  $citations
+     * @param  array<string, mixed>|null  $tempCitation
+     */
     public function __construct(
         protected string $model = '',
         protected string $requestId = '',
@@ -56,11 +61,17 @@ class StreamState
         return $this;
     }
 
+    /**
+     * @return array<int, array<string, mixed>>
+     */
     public function toolCalls(): array
     {
         return $this->toolCalls;
     }
 
+    /**
+     * @param  array<int, array<string, mixed>>  $toolCalls
+     */
     public function setToolCalls(array $toolCalls): self
     {
         $this->toolCalls = $toolCalls;
@@ -68,6 +79,9 @@ class StreamState
         return $this;
     }
 
+    /**
+     * @param  array<string, mixed>  $toolCall
+     */
     public function addToolCall(int $index, array $toolCall): self
     {
         $this->toolCalls[$index] = $toolCall;
@@ -108,6 +122,9 @@ class StreamState
         return $this;
     }
 
+    /**
+     * @return array<int, MessagePartWithCitations>
+     */
     public function citations(): array
     {
         return $this->citations;
@@ -156,11 +173,17 @@ class StreamState
         return $this;
     }
 
+    /**
+     * @return array<string, mixed>|null
+     */
     public function tempCitation(): ?array
     {
         return $this->tempCitation;
     }
 
+    /**
+     * @param  array<string, mixed>|null  $citation
+     */
     public function setTempCitation(?array $citation): self
     {
         $this->tempCitation = $citation;
@@ -195,6 +218,9 @@ class StreamState
         return $this;
     }
 
+    /**
+     * @return array<string, mixed>
+     */
     public function buildAdditionalContent(): array
     {
         $additionalContent = [];

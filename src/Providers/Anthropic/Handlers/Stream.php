@@ -444,6 +444,8 @@ class Stream
     }
 
     /**
+     * @return array<string, mixed>|null
+     *
      * @throws PrismChunkDecodeException
      */
     protected function parseEventChunk(string $line, StreamInterface $stream): ?array
@@ -469,6 +471,8 @@ class Stream
     }
 
     /**
+     * @return array<string, mixed>|null
+     *
      * @throws PrismChunkDecodeException
      */
     protected function parseDataChunk(string $line): ?array
@@ -483,6 +487,8 @@ class Stream
     }
 
     /**
+     * @return array<string, mixed>|null
+     *
      * @throws PrismChunkDecodeException
      */
     protected function parseJsonData(string $jsonDataLine, ?string $eventType = null): ?array
@@ -533,6 +539,7 @@ class Stream
     }
 
     /**
+     * @param  array<int|string, mixed>  $toolResults
      * @param  array<string, mixed>|null  $additionalContent
      */
     protected function addMessagesToRequest(Request $request, array $toolResults, ?array $additionalContent): void
@@ -606,6 +613,9 @@ class Stream
         ];
     }
 
+    /**
+     * @param  array<string, mixed>|null  $citation
+     */
     protected function determineCitationType(?array $citation): string
     {
         if ($citation === null) {
