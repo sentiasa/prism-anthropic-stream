@@ -19,6 +19,7 @@ use Prism\Prism\Exceptions\PrismRateLimitedException;
 use Prism\Prism\Providers\Anthropic\Concerns\HandlesResponse;
 use Prism\Prism\Providers\Anthropic\Maps\FinishReasonMap;
 use Prism\Prism\Providers\Anthropic\ValueObjects\MessagePartWithCitations;
+use Prism\Prism\Providers\Anthropic\ValueObjects\StreamState;
 use Prism\Prism\Text\Chunk;
 use Prism\Prism\Text\Request;
 use Prism\Prism\ValueObjects\Messages\AssistantMessage;
@@ -32,38 +33,12 @@ class Stream
 {
     use CallsTools, HandlesResponse;
 
-    protected string $model = '';
+    protected StreamState $state;
 
-    protected string $requestId = '';
-
-    protected string $text = '';
-
-    /**
-     * @var array<int, array<string, mixed>>
-     */
-    protected array $toolCalls = [];
-
-    protected string $thinking = '';
-
-    protected string $thinkingSignature = '';
-
-    /**
-     * @var MessagePartWithCitations[]
-     */
-    protected array $citations = [];
-
-    protected ?string $tempContentBlockType = null;
-
-    protected ?int $tempContentBlockIndex = null;
-
-    /**
-     * @var array<string,mixed>|null
-     */
-    protected ?array $tempCitation = null;
-
-    protected string $stopReason = '';
-
-    public function __construct(protected PendingRequest $client) {}
+    public function __construct(protected PendingRequest $client)
+    {
+        $this->state = new StreamState;
+    }
 
     /**
      * @return Generator<Chunk>
@@ -87,12 +62,35 @@ class Stream
      */
     protected function processStream(Response $response, Request $request, int $depth = 0): Generator
     {
-        $this->resetState();
+        $this->state->reset();
 
+        $this->validateToolCallDepth($request, $depth);
+
+        yield from $this->processStreamChunks($response, $request, $depth);
+
+        if ($this->state->hasToolCalls()) {
+            yield from $this->handleToolUseFinish($request, $depth);
+        }
+    }
+
+    /**
+     * @throws PrismException
+     */
+    protected function validateToolCallDepth(Request $request, int $depth): void
+    {
         if ($depth >= $request->maxSteps()) {
             throw new PrismException('Maximum tool call chain depth exceeded');
         }
+    }
 
+    /**
+     * @return Generator<Chunk>
+     *
+     * @throws PrismChunkDecodeException
+     * @throws PrismException
+     */
+    protected function processStreamChunks(Response $response, Request $request, int $depth): Generator
+    {
         while (! $response->getBody()->eof()) {
             $chunk = $this->parseNextChunk($response->getBody());
 
@@ -100,30 +98,7 @@ class Stream
                 continue;
             }
 
-            $outcome = match ($chunk['type']) {
-                // Returns a meta chunk with the request ID and model to yield
-                'message_start' => $this->handleMessageStart(response: $response, chunk: $chunk),
-
-                // States temporary content block state and adds any tool use to tool calls
-                'content_block_start' => $this->handleContentBlockStart($chunk),
-
-                // Adds text, thinking and tool inputs to state. For text and thinking, returns a chunk to yield.
-                'content_block_delta' => $this->handleContentBlockDelta($chunk),
-
-                // Resets temporary content block state
-                'content_block_stop' => $this->handleContentBlockStop(),
-
-                // Handles a tool use if finish is tool use
-                'message_delta' => $this->handleMessageDelta($chunk, $request, $depth),
-
-                // Sends a final meta chunk with the final text, finish reason, meta and additionalContent
-                'message_stop' => $this->handleMessageStop($response, $request, $depth),
-
-                'error' => $this->handleError($chunk),
-
-                // E.g. ping
-                default => null
-            };
+            $outcome = $this->processChunk($chunk, $response, $request, $depth);
 
             if ($outcome instanceof Generator) {
                 yield from $outcome;
@@ -133,26 +108,44 @@ class Stream
                 yield $outcome;
             }
         }
-
-        if ($this->toolCalls !== []) {
-            yield from $this->handleToolUseFinish($request, $depth);
-        }
     }
 
     /**
-     * @param  array<string,mixed>  $chunk
+     * @param  array<string, mixed>  $chunk
+     *
+     * @throws PrismChunkDecodeException
+     * @throws PrismException
+     * @throws PrismRateLimitedException
+     */
+    protected function processChunk(array $chunk, Response $response, Request $request, int $depth): Generator|Chunk|null
+    {
+        return match ($chunk['type'] ?? null) {
+            'message_start' => $this->handleMessageStart($response, $chunk),
+            'content_block_start' => $this->handleContentBlockStart($chunk),
+            'content_block_delta' => $this->handleContentBlockDelta($chunk),
+            'content_block_stop' => $this->handleContentBlockStop(),
+            'message_delta' => $this->handleMessageDelta($chunk, $request, $depth),
+            'message_stop' => $this->handleMessageStop($response, $request, $depth),
+            'error' => $this->handleError($chunk),
+            default => null,
+        };
+    }
+
+    /**
+     * @param  array<string, mixed>  $chunk
      */
     protected function handleMessageStart(Response $response, array $chunk): Chunk
     {
-        $this->model = data_get($chunk, 'message.model', '');
-        $this->requestId = data_get($chunk, 'message.id', '');
+        $this->state
+            ->setModel(data_get($chunk, 'message.model', ''))
+            ->setRequestId(data_get($chunk, 'message.id', ''));
 
         return new Chunk(
             text: '',
             finishReason: null,
             meta: new Meta(
-                id: $this->requestId,
-                model: $this->model,
+                id: $this->state->requestId(),
+                model: $this->state->model(),
                 rateLimits: $this->processRateLimits($response)
             ),
             chunkType: ChunkType::Meta
@@ -164,17 +157,19 @@ class Stream
      */
     protected function handleContentBlockStart(array $chunk): void
     {
-        $this->tempContentBlockType = data_get($chunk, 'content_block.type');
-        $this->tempContentBlockIndex = (int) data_get($chunk, 'index');
+        $blockType = data_get($chunk, 'content_block.type');
+        $blockIndex = (int) data_get($chunk, 'index');
 
-        if ($this->tempContentBlockType === 'tool_use') {
-            $index = $this->tempContentBlockIndex;
+        $this->state
+            ->setTempContentBlockType($blockType)
+            ->setTempContentBlockIndex($blockIndex);
 
-            $this->toolCalls[$index] = [
+        if ($blockType === 'tool_use') {
+            $this->state->addToolCall($blockIndex, [
                 'id' => data_get($chunk, 'content_block.id'),
                 'name' => data_get($chunk, 'content_block.name'),
                 'input' => '',
-            ];
+            ]);
         }
     }
 
@@ -184,87 +179,137 @@ class Stream
     protected function handleContentBlockDelta(array $chunk): ?Chunk
     {
         $deltaType = data_get($chunk, 'delta.type');
+        $blockType = $this->state->tempContentBlockType();
 
-        if ($this->tempContentBlockType === 'text') {
-            if ($deltaType === 'text_delta') {
-                $textDelta = data_get($chunk, 'delta.text', '');
-
-                if (empty($textDelta)) {
-                    $textDelta = data_get($chunk, 'delta.text_delta.text', '');
-                }
-
-                if (empty($textDelta)) {
-                    $textDelta = data_get($chunk, 'text', '');
-                }
-
-                if (! empty($textDelta)) {
-                    $this->text .= $textDelta;
-
-                    $additionalContent = [];
-
-                    if ($this->tempCitation !== null) {
-                        $this->citations[] = MessagePartWithCitations::fromContentBlock([
-                            'text' => $textDelta,
-                            'citations' => [$this->tempCitation],
-                        ]);
-
-                        $additionalContent['citationIndex'] = array_key_last($this->citations);
-                    }
-
-                    return new Chunk(
-                        text: $textDelta,
-                        finishReason: null,
-                        chunkType: ChunkType::Message,
-                        additionalContent: $additionalContent
-                    );
-                }
-            }
-
-            if ($deltaType === 'citations_delta') {
-                $this->tempCitation = $this->extractCitationsFromChunk($chunk);
-            }
+        if ($blockType === 'text') {
+            return $this->handleTextBlockDelta($chunk, $deltaType);
         }
 
-        if ($this->tempContentBlockType === 'tool_use' && $deltaType === 'input_json_delta') {
-            $jsonDelta = data_get($chunk, 'delta.partial_json', '');
-
-            if (empty($jsonDelta)) {
-                $jsonDelta = data_get($chunk, 'delta.input_json_delta.partial_json', '');
-            }
-
-            if ($this->tempContentBlockIndex !== null && isset($this->toolCalls[$this->tempContentBlockIndex])) {
-                $this->toolCalls[$this->tempContentBlockIndex]['input'] .= $jsonDelta;
-            }
-
-            return null;
+        if ($blockType === 'tool_use' && $deltaType === 'input_json_delta') {
+            return $this->handleToolInputDelta($chunk);
         }
 
-        if ($this->tempContentBlockType === 'thinking') {
-            if ($deltaType === 'thinking_delta') {
-                $thinkingDelta = data_get($chunk, 'delta.thinking', '');
+        if ($blockType === 'thinking') {
+            return $this->handleThinkingBlockDelta($chunk, $deltaType);
+        }
 
-                if (empty($thinkingDelta)) {
-                    $thinkingDelta = data_get($chunk, 'delta.thinking_delta.thinking', '');
-                }
+        return null;
+    }
 
-                $this->thinking .= $thinkingDelta;
+    /**
+     * @param  array<string, mixed>  $chunk
+     */
+    protected function handleTextBlockDelta(array $chunk, ?string $deltaType): ?Chunk
+    {
+        if ($deltaType === 'text_delta') {
+            $textDelta = $this->extractTextDelta($chunk);
+
+            if ($textDelta !== '' && $textDelta !== '0') {
+                $this->state->appendText($textDelta);
+                $additionalContent = $this->buildCitationContent();
 
                 return new Chunk(
-                    text: $thinkingDelta,
+                    text: $textDelta,
                     finishReason: null,
-                    chunkType: ChunkType::Thinking
+                    chunkType: ChunkType::Message,
+                    additionalContent: $additionalContent
                 );
             }
-            if ($deltaType === 'signature_delta') {
+        }
 
-                $signatureDelta = data_get($chunk, 'delta.signature', '');
+        if ($deltaType === 'citations_delta') {
+            $this->state->setTempCitation($this->extractCitationsFromChunk($chunk));
+        }
 
-                if (empty($signatureDelta)) {
-                    $signatureDelta = data_get($chunk, 'delta.signature_delta.signature', '');
-                }
+        return null;
+    }
 
-                $this->thinkingSignature .= $signatureDelta;
+    /**
+     * @return array<string, mixed>
+     */
+    protected function buildCitationContent(): array
+    {
+        $additionalContent = [];
+
+        if ($this->state->tempCitation() !== null) {
+            $this->state->addCitation(MessagePartWithCitations::fromContentBlock([
+                'text' => $this->state->text(),
+                'citations' => [$this->state->tempCitation()],
+            ]));
+
+            $additionalContent['citationIndex'] = count($this->state->citations()) - 1;
+        }
+
+        return $additionalContent;
+    }
+
+    /**
+     * @param  array<string, mixed>  $chunk
+     */
+    protected function extractTextDelta(array $chunk): string
+    {
+        $textDelta = data_get($chunk, 'delta.text', '');
+
+        if (empty($textDelta)) {
+            $textDelta = data_get($chunk, 'delta.text_delta.text', '');
+        }
+
+        if (empty($textDelta)) {
+            return data_get($chunk, 'text', '');
+        }
+
+        return $textDelta;
+    }
+
+    /**
+     * @param  array<string, mixed>  $chunk
+     */
+    protected function handleToolInputDelta(array $chunk): ?Chunk
+    {
+        $jsonDelta = data_get($chunk, 'delta.partial_json', '');
+
+        if (empty($jsonDelta)) {
+            $jsonDelta = data_get($chunk, 'delta.input_json_delta.partial_json', '');
+        }
+
+        $blockIndex = $this->state->tempContentBlockIndex();
+
+        if ($blockIndex !== null) {
+            $this->state->appendToolCallInput($blockIndex, $jsonDelta);
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $chunk
+     */
+    protected function handleThinkingBlockDelta(array $chunk, ?string $deltaType): ?Chunk
+    {
+        if ($deltaType === 'thinking_delta') {
+            $thinkingDelta = data_get($chunk, 'delta.thinking', '');
+
+            if (empty($thinkingDelta)) {
+                $thinkingDelta = data_get($chunk, 'delta.thinking_delta.thinking', '');
             }
+
+            $this->state->appendThinking($thinkingDelta);
+
+            return new Chunk(
+                text: $thinkingDelta,
+                finishReason: null,
+                chunkType: ChunkType::Thinking
+            );
+        }
+
+        if ($deltaType === 'signature_delta') {
+            $signatureDelta = data_get($chunk, 'delta.signature', '');
+
+            if (empty($signatureDelta)) {
+                $signatureDelta = data_get($chunk, 'delta.signature_delta.signature', '');
+            }
+
+            $this->state->appendThinkingSignature($signatureDelta);
         }
 
         return null;
@@ -272,19 +317,21 @@ class Stream
 
     protected function handleContentBlockStop(): void
     {
-        $this->tempContentBlockType = null;
-        $this->tempContentBlockIndex = null;
-        $this->tempCitation = null;
+        $this->state->resetContentBlock();
     }
 
     /**
-     * @param  array<string,mixed>  $chunk
+     * @param  array<string, mixed>  $chunk
      */
     protected function handleMessageDelta(array $chunk, Request $request, int $depth): ?Generator
     {
-        $this->stopReason = data_get($chunk, 'delta.stop_reason', $this->stopReason);
+        $stopReason = data_get($chunk, 'delta.stop_reason', '');
 
-        if ($this->stopReason === 'tool_use' && $this->toolCalls !== []) {
+        if (! empty($stopReason)) {
+            $this->state->setStopReason($stopReason);
+        }
+
+        if ($this->state->isToolUseFinish()) {
             return $this->handleToolUseFinish($request, $depth);
         }
 
@@ -298,43 +345,21 @@ class Stream
      */
     protected function handleMessageStop(Response $response, Request $request, int $depth): Generator|Chunk
     {
-        if ($this->stopReason === 'tool_use' && $this->toolCalls !== []) {
+        if ($this->state->isToolUseFinish()) {
             return $this->handleToolUseFinish($request, $depth);
         }
 
         return new Chunk(
-            text: $this->text,
-            finishReason: FinishReasonMap::map($this->stopReason),
+            text: $this->state->text(),
+            finishReason: FinishReasonMap::map($this->state->stopReason()),
             meta: new Meta(
-                id: $this->requestId,
-                model: $this->model,
+                id: $this->state->requestId(),
+                model: $this->state->model(),
                 rateLimits: $this->processRateLimits($response)
             ),
-            additionalContent: $this->buildAdditionalContent(),
+            additionalContent: $this->state->buildAdditionalContent(),
             chunkType: ChunkType::Meta
         );
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    protected function buildAdditionalContent(): array
-    {
-        $additionalContent = [];
-
-        if ($this->thinking !== '') {
-            $additionalContent['thinking'] = $this->thinking;
-
-            if ($this->thinkingSignature !== null) {
-                $additionalContent['thinking_signature'] = $this->thinkingSignature;
-            }
-        }
-
-        if ($this->citations !== []) {
-            $additionalContent['messagePartsWithCitations'] = $this->citations;
-        }
-
-        return $additionalContent;
     }
 
     /**
@@ -347,7 +372,7 @@ class Stream
     protected function handleToolUseFinish(Request $request, int $depth): Generator
     {
         $mappedToolCalls = $this->mapToolCalls();
-        $additionalContent = $this->buildAdditionalContent();
+        $additionalContent = $this->state->buildAdditionalContent();
 
         yield new Chunk(
             text: '',
@@ -375,7 +400,7 @@ class Stream
                 name: data_get($toolCall, 'name'),
                 arguments: $input
             );
-        }, $this->toolCalls));
+        }, $this->state->toolCalls()));
     }
 
     protected function isValidJson(string $string): bool
@@ -408,53 +433,79 @@ class Stream
         }
 
         if (str_starts_with($line, 'event:')) {
-            $eventType = trim(substr($line, strlen('event:')));
-
-            if ($eventType === 'ping') {
-                return ['type' => 'ping'];
-            }
-
-            $dataLine = $this->readLine($stream);
-
-            if (in_array(trim($dataLine), ['', '0'], true)) {
-                return ['type' => $eventType];
-            }
-
-            if (! str_starts_with(trim($dataLine), 'data:')) {
-                return ['type' => $eventType];
-            }
-
-            $jsonData = trim(substr(trim($dataLine), strlen('data:')));
-
-            if ($jsonData === '' || $jsonData === '0') {
-                return ['type' => $eventType];
-            }
-
-            try {
-                $data = json_decode($jsonData, true, flags: JSON_THROW_ON_ERROR);
-                $data['type'] = $eventType;
-
-                return $data;
-            } catch (Throwable $e) {
-                throw new PrismChunkDecodeException('Anthropic', $e);
-            }
+            return $this->parseEventChunk($line, $stream);
         }
 
         if (str_starts_with($line, 'data:')) {
-            $jsonData = trim(substr($line, strlen('data:')));
-
-            if ($jsonData === '' || $jsonData === '0' || str_contains($jsonData, 'DONE')) {
-                return null;
-            }
-
-            try {
-                return json_decode($jsonData, true, flags: JSON_THROW_ON_ERROR);
-            } catch (Throwable $e) {
-                throw new PrismChunkDecodeException('Anthropic', $e);
-            }
+            return $this->parseDataChunk($line);
         }
 
         return null;
+    }
+
+    /**
+     * @throws PrismChunkDecodeException
+     */
+    protected function parseEventChunk(string $line, StreamInterface $stream): ?array
+    {
+        $eventType = trim(substr($line, strlen('event:')));
+
+        if ($eventType === 'ping') {
+            return ['type' => 'ping'];
+        }
+
+        $dataLine = $this->readLine($stream);
+        $dataLine = trim($dataLine);
+
+        if ($dataLine === '' || $dataLine === '0') {
+            return ['type' => $eventType];
+        }
+
+        if (! str_starts_with($dataLine, 'data:')) {
+            return ['type' => $eventType];
+        }
+
+        return $this->parseJsonData($dataLine, $eventType);
+    }
+
+    /**
+     * @throws PrismChunkDecodeException
+     */
+    protected function parseDataChunk(string $line): ?array
+    {
+        $jsonData = trim(substr($line, strlen('data:')));
+
+        if ($jsonData === '' || $jsonData === '0' || str_contains($jsonData, 'DONE')) {
+            return null;
+        }
+
+        return $this->parseJsonData($jsonData);
+    }
+
+    /**
+     * @throws PrismChunkDecodeException
+     */
+    protected function parseJsonData(string $jsonDataLine, ?string $eventType = null): ?array
+    {
+        $jsonData = trim(str_starts_with($jsonDataLine, 'data:')
+            ? substr($jsonDataLine, strlen('data:'))
+            : $jsonDataLine);
+
+        if ($jsonData === '' || $jsonData === '0') {
+            return $eventType ? ['type' => $eventType] : null;
+        }
+
+        try {
+            $data = json_decode($jsonData, true, flags: JSON_THROW_ON_ERROR);
+
+            if ($eventType) {
+                $data['type'] = $eventType;
+            }
+
+            return $data;
+        } catch (Throwable $e) {
+            throw new PrismChunkDecodeException('Anthropic', $e);
+        }
     }
 
     /**
@@ -470,8 +521,7 @@ class Stream
     {
         $toolResults = $this->callTools($request->tools(), $toolCalls);
 
-        $request->addMessage(new AssistantMessage($this->text, $toolCalls, $additionalContent ?? []));
-        $request->addMessage(new ToolResultMessage($toolResults));
+        $this->addMessagesToRequest($request, $toolResults, $additionalContent);
 
         yield new Chunk(
             text: '',
@@ -480,6 +530,20 @@ class Stream
 
         $nextResponse = $this->sendRequest($request);
         yield from $this->processStream($nextResponse, $request, $depth + 1);
+    }
+
+    /**
+     * @param  array<string, mixed>|null  $additionalContent
+     */
+    protected function addMessagesToRequest(Request $request, array $toolResults, ?array $additionalContent): void
+    {
+        $request->addMessage(new AssistantMessage(
+            $this->state->text(),
+            $this->mapToolCalls(),
+            $additionalContent ?? []
+        ));
+
+        $request->addMessage(new ToolResultMessage($toolResults));
     }
 
     /**
@@ -527,22 +591,14 @@ class Stream
     }
 
     /**
-     * @param  array<string,mixed>  $chunk
-     * @return array<string,mixed>
+     * @param  array<string, mixed>  $chunk
+     * @return array<string, mixed>
      */
     protected function extractCitationsFromChunk(array $chunk): array
     {
         $citation = data_get($chunk, 'delta.citation', null);
 
-        if (Arr::has($citation, 'start_page_number')) {
-            $type = 'page_location';
-        } elseif (Arr::has($citation, 'start_char_index')) {
-            $type = 'char_location';
-        } elseif (Arr::has($citation, 'start_block_index')) {
-            $type = 'content_block_location';
-        } else {
-            throw new InvalidArgumentException('Citation type could not be detected from signature.');
-        }
+        $type = $this->determineCitationType($citation);
 
         return [
             'type' => $type,
@@ -550,19 +606,25 @@ class Stream
         ];
     }
 
-    protected function resetState(): void
+    protected function determineCitationType(?array $citation): string
     {
-        $this->model = '';
-        $this->requestId = '';
-        $this->text = '';
-        $this->toolCalls = [];
-        $this->thinking = '';
-        $this->thinkingSignature = '';
-        $this->citations = [];
-        $this->stopReason = '';
+        if ($citation === null) {
+            throw new InvalidArgumentException('Citation cannot be null.');
+        }
 
-        $this->tempContentBlockType = null;
-        $this->tempContentBlockIndex = null;
+        if (Arr::has($citation, 'start_page_number')) {
+            return 'page_location';
+        }
+
+        if (Arr::has($citation, 'start_char_index')) {
+            return 'char_location';
+        }
+
+        if (Arr::has($citation, 'start_block_index')) {
+            return 'content_block_location';
+        }
+
+        throw new InvalidArgumentException('Citation type could not be detected from signature.');
     }
 
     /**
